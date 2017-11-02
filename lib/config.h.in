@@ -159,6 +159,10 @@
    don't. */
 #undef HAVE_DECL_RTA_VIA
 
+/* Define to 1 if you have the declaration of `RTEXT_FILTER_SKIP_STATS', and
+   to 0 if you don't. */
+#undef HAVE_DECL_RTEXT_FILTER_SKIP_STATS
+
 /* Define to 1 if you have the declaration of `SOCK_CLOEXEC', and to 0 if you
    don't. */
 #undef HAVE_DECL_SOCK_CLOEXEC
@@ -640,7 +644,7 @@
 /* Define to 1 to build with stacktrace support */
 #undef _WITH_STACKTRACE_
 
-/* Define to 1 to enable v1.3.7 and earlier VRRPv3 unicast checksum
+/* Define to 1 to enable v1.3.6 and earlier VRRPv3 unicast checksum
    compatibility */
 #undef _WITH_UNICAST_CHKSUM_COMPAT_
 

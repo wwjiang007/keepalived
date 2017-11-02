@@ -106,7 +106,11 @@ stop_check(int status)
 	 */
 	log_message(LOG_INFO, "Stopped");
 
+	if (log_file_name)
+		close_log_file();
 	closelog();
+
+	FREE(config_id);
 
 #ifndef _MEM_CHECK_LOG_
 	FREE_PTR(check_syslog_ident);
@@ -176,7 +180,7 @@ start_check(list old_checkers_queue)
 #endif
 
 	/* SSL load static data & initialize common ctx context */
-	if (!init_ssl_ctx())
+	if (check_data->ssl_required && !init_ssl_ctx())
 		stop_check(KEEPALIVED_EXIT_FATAL);
 
 	/* Set the process priority and non swappable if configured */
@@ -312,6 +316,9 @@ start_check_child(void)
 	char *syslog_ident;
 
 	/* Initialize child process */
+	if (log_file_name)
+		flush_log_file();
+
 	pid = fork();
 
 	if (pid < 0) {
@@ -330,6 +337,10 @@ start_check_child(void)
 	}
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
+	/* Clear any child finder functions set in parent */
+	set_child_finder_name(NULL);
+	set_child_finder(NULL, NULL, NULL, NULL, NULL, 0);	/* Currently these won't be set */
+
 	prog_type = PROG_TYPE_CHECKER;
 
 	if ((instance_name
@@ -343,8 +354,12 @@ start_check_child(void)
 		syslog_ident = PROG_CHECK;
 
 	/* Opening local CHECK syslog channel */
-	openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
-			    , (log_facility==LOG_DAEMON) ? LOG_LOCAL2 : log_facility);
+	if (!__test_bit(NO_SYSLOG_BIT, &debug))
+		openlog(syslog_ident, LOG_PID | ((__test_bit(LOG_CONSOLE_BIT, &debug)) ? LOG_CONS : 0)
+				    , (log_facility==LOG_DAEMON) ? LOG_LOCAL2 : log_facility);
+
+	if (log_file_name)
+		open_log_file(log_file_name, "check", network_namespace, instance_name);
 
 #ifdef _MEM_CHECK_
 	mem_log_init(PROG_CHECK, "Healthcheck child process");

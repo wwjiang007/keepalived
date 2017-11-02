@@ -363,7 +363,6 @@ vrrp_vrid_handler(vector_t *strvec)
 	}
 
 	vrrp->vrid = (uint8_t)vrid;
-	alloc_vrrp_bucket(vrrp);
 }
 static void
 vrrp_prio_handler(vector_t *strvec)
@@ -787,7 +786,7 @@ static void
 vrrp_vscript_init_fail_handler(__attribute__((unused)) vector_t *strvec)
 {
 	vrrp_script_t *vscript = LIST_TAIL_DATA(vrrp_data->vrrp_script);
-	vscript->result = VRRP_SCRIPT_STATUS_INIT_FAILED;
+	vscript->init_state = SCRIPT_INIT_STATE_FAILED;
 }
 static void
 vrrp_version_handler(vector_t *strvec)

@@ -116,6 +116,9 @@ alloc_http_get(char *proto)
 	http_get_chk->url = alloc_list(free_url, dump_url);
 	http_get_chk->virtualhost = NULL;
 
+	if (http_get_chk->proto == PROTO_SSL)
+		check_data->ssl_required = true;
+
 	return http_get_chk;
 }
 
@@ -679,7 +682,7 @@ http_request_thread(thread_t * thread)
 			fetched_url->path, request_host, request_host_port);
 	}
 
-	DBG("Processing url(%u) of %s.", http->url_it + 1 , FMT_HTTP_RS(checker));
+	DBG("Processing url(%u) of %s.", http_get_check->url_it + 1 , FMT_HTTP_RS(checker));
 
 	/* Set descriptor non blocking */
 	val = fcntl(thread->u.fd, F_GETFL, 0);
