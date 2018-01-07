@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -37,6 +37,7 @@
 #include "main.h"
 #include "config.h"
 #include "git-commit.h"
+#include "utils.h"
 #include "signals.h"
 #include "pidfile.h"
 #include "bitops.h"
@@ -127,13 +128,17 @@ free_parent_mallocs_startup(bool am_child)
 #else
 		free(syslog_ident);
 #endif
+		syslog_ident = NULL;
 
-		if (orig_core_dump_pattern)
+		if (orig_core_dump_pattern) {
 			FREE_PTR(orig_core_dump_pattern);
+			orig_core_dump_pattern = NULL;
+		}
 	}
 
 	if (free_main_pidfile) {
 		FREE_PTR(main_pidfile);
+		main_pidfile = NULL;
 		free_main_pidfile = false;
 	}
 }
@@ -592,6 +597,9 @@ parse_cmdline(int argc, char **argv)
 	bool reopen_log = false;
 	int signum;
 	struct utsname uname_buf;
+	int longindex;
+	int curind;
+	bool bad_option = false;
 
 	struct option long_options[] = {
 		{"use-file",		required_argument,	NULL, 'f'},
@@ -636,14 +644,18 @@ parse_cmdline(int argc, char **argv)
 		{"namespace",		required_argument,	NULL, 's'},
 #endif	
 		{"config-id",		required_argument,	NULL, 'i'},
-		{"signum",		required_argument,	NULL,  1 },
+		{"signum",		required_argument,	NULL,  4 },
 		{"version",		no_argument,		NULL, 'v'},
 		{"help",		no_argument,		NULL, 'h'},
 
 		{NULL,			0,			NULL,  0 }
 	};
 
-	while ((c = getopt_long(argc, argv, "vhlndDRS:f:p:i:mMg:G"
+	/* Unfortunately, if a short option is used, getopt_long() doesn't change the value
+	 * of longindex, so we need to ensure that before calling getopt_long(), longindex
+	 * is set to a know invalid value */
+	curind = optind;
+	while (longindex = -1, (c = getopt_long(argc, argv, ":vhlndDRS:f:p:i:mM::g::G"
 #if defined _WITH_VRRP_ && defined _WITH_LVS_
 					    "PC"
 #endif
@@ -662,7 +674,15 @@ parse_cmdline(int argc, char **argv)
 #if HAVE_DECL_CLONE_NEWNET
 					    "s:"
 #endif
-				, long_options, NULL)) != EOF) {
+				, long_options, &longindex)) != -1) {
+
+		/* Check for an empty option argument. For example --use-file= returns
+		 * a 0 length option, which we don't want */
+		if (longindex >= 0 && long_options[longindex].has_arg == required_argument && optarg && !optarg[0]) {
+			c = ':';
+			optarg = NULL;
+		}
+
 		switch (c) {
 		case 'v':
 			fprintf(stderr, "%s", version_string);
@@ -793,7 +813,7 @@ parse_cmdline(int argc, char **argv)
 			config_id = MALLOC(strlen(optarg) + 1);
 			strcpy(config_id, optarg);
 			break;
-		case 1:			/* --signum */
+		case 4:			/* --signum */
 			signum = get_signum(optarg);
 			if (signum == -1) {
 				fprintf(stderr, "Unknown sigfunc %s\n", optarg);
@@ -803,10 +823,25 @@ parse_cmdline(int argc, char **argv)
 			printf("%d\n", signum);
 			exit(0);
 			break;
+		case '?':
+			if (optopt && argv[curind][1] != '-')
+				fprintf(stderr, "Unknown option -%c\n", optopt);
+			else
+				fprintf(stderr, "Unknown option --%s\n", argv[curind]);
+			bad_option = true;
+			break;
+		case ':':
+			if (optopt && argv[curind][1] != '-')
+				fprintf(stderr, "Missing parameter for option -%c\n", optopt);
+			else
+				fprintf(stderr, "Missing parameter for option --%s\n", long_options[longindex].name);
+			bad_option = true;
+			break;
 		default:
-			exit(0);
+			exit(1);
 			break;
 		}
+		curind = optind;
 	}
 
 	if (optind < argc) {
@@ -815,6 +850,9 @@ parse_cmdline(int argc, char **argv)
 			printf("%s ", argv[optind++]);
 		printf("\n");
 	}
+
+	if (bad_option)
+		exit(1);
 
 	return reopen_log;
 }
@@ -1026,8 +1064,14 @@ keepalived_main(int argc, char **argv)
 	}
 
 	/* daemonize process */
-	if (!__test_bit(DONT_FORK_BIT, &debug))
-		xdaemon(0, 0, 0);
+	if (!__test_bit(DONT_FORK_BIT, &debug) &&
+	    xdaemon(false, false, true) > 0) {
+		closelog();
+		FREE(config_id);
+		FREE(orig_core_dump_pattern);
+		close_std_fd();
+		exit(0);
+	}
 
 	/* Set file creation mask */
 	umask(0);
@@ -1097,6 +1141,7 @@ end:
 	if (syslog_ident)
 		free(syslog_ident);
 #endif
+	close_std_fd();
 
 	exit(0);
 }

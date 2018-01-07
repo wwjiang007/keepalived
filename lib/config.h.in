@@ -131,6 +131,10 @@
    if you don't. */
 #undef HAVE_DECL_MACVLAN_MODE_PRIVATE
 
+/* Define to 1 if you have the declaration of `O_PATH', and to 0 if you don't.
+   */
+#undef HAVE_DECL_O_PATH
+
 /* Define to 1 if you have the declaration of `RTAX_CC_ALGO', and to 0 if you
    don't. */
 #undef HAVE_DECL_RTAX_CC_ALGO
@@ -512,6 +516,10 @@
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
 
+/* Define to 1 if <linux/netfilter/xt_set.h> needs <libipset/linux_ip_set.h>
+   */
+#undef USE_LIBIPSET_LINUX_IP_SET_H
+
 /* Version number of package */
 #undef VERSION
 
@@ -520,10 +528,6 @@
 
 /* Define if <linux/netfilter/x_tables.h> doesnt define it */
 #undef XT_EXTENSION_MAXNAMELEN
-
-/* Define to 1 if <linux/netfilter/xt_set.h> needs <libipset/linux_ip_set.h>
-   */
-#undef XT_SET_H_NEEDS_LINUX_IP_SET_H
 
 /* Define to 1 to build with debugging support */
 #undef _DEBUG_
@@ -626,9 +630,6 @@
 /* Define to 1 to have keepalived SNMP checker support */
 #undef _WITH_SNMP_CHECKER_
 
-/* Define to 1 to have keepalived SNMP VRRP support */
-#undef _WITH_SNMP_KEEPALIVED_
-
 /* Define to 1 to have RFCv2 SNMP support */
 #undef _WITH_SNMP_RFCV2_
 
@@ -637,6 +638,9 @@
 
 /* Define to 1 to have RFC SNMP support */
 #undef _WITH_SNMP_RFC_
+
+/* Define to 1 to have keepalived SNMP VRRP support */
+#undef _WITH_SNMP_VRRP_
 
 /* Define to 1 if have SO_MARK */
 #undef _WITH_SO_MARK_

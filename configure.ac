@@ -88,7 +88,7 @@ m4_ifndef([AS_VAR_COPY],
 
 dnl ----[ Process this file with autoconf to produce a configure script ]----
 AC_PREREQ([2.63])
-AC_INIT([Keepalived], [1.3.9], [keepalived-devel@lists.sourceforge.net], [], [http://www.keepalived.org/])
+AC_INIT([Keepalived], [1.4.0], [keepalived-devel@lists.sourceforge.net], [], [http://www.keepalived.org/])
 AM_INIT_AUTOMAKE([-Wall -Werror -Woverride foreign])
 
 AC_CONFIG_SRCDIR([keepalived/core/main.c])
@@ -158,8 +158,8 @@ AC_ARG_WITH(init,
   [init_type="$withval"], [init_type=""])
 AC_ARG_ENABLE(vrrp-auth,
   [AS_HELP_STRING([--disable-vrrp-auth], [compile without VRRP authentication])])
-AC_ARG_ENABLE(chksum_compat,
-  [AS_HELP_STRING([--disable-checksum_compat], [compile without v1.3.6 and earlier VRRPv3 unicast checksum compatibility])])
+AC_ARG_ENABLE(checksum_compat,
+  [AS_HELP_STRING([--disable-checksum-compat], [compile without v1.3.6 and earlier VRRPv3 unicast checksum compatibility])])
 AC_ARG_ENABLE(routes,
   [AS_HELP_STRING([--disable-routes], [compile without ip rules/routes])])
 AC_ARG_ENABLE(gnu-std-paths,
@@ -735,19 +735,23 @@ if test .${enable_libiptc} != .no -a .$enable_vrrp != .no; then
           fi
 
           if test $USE_LIBIPSET = Yes; then
-            dnl -- Need to include <libipset/linux_ip_set.h> for <linux/netfilter/xt_set.h> prior to Linux 3.4
+            dnl -- Need to use <libipset/linux_ip_set.h> for <linux/netfilter/xt_set.h> prior to Linux 3.4
             EXTRA_INCLUDE=
             AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
               #include <linux/netfilter/xt_set.h>
-              ]])], [],
+              ]])],
+              [AC_CHECK_HEADERS([linux/netfilter/xt_set.h], [], [USE_LIBIPSET=No], [])],
               [AC_CHECK_HEADER([linux/netfilter/xt_set.h],
                 [
-                  AC_DEFINE([XT_SET_H_NEEDS_LINUX_IP_SET_H], [ 1 ], [Define to 1 if <linux/netfilter/xt_set.h> needs <libipset/linux_ip_set.h>])
+                  AC_DEFINE([USE_LIBIPSET_LINUX_IP_SET_H], [ 1 ], [Define to 1 if <linux/netfilter/xt_set.h> needs <libipset/linux_ip_set.h>])
                   EXTRA_INCLUDE="#include <libipset/linux_ip_set.h>"
-                ], [AC_MSG_ERROR([Missing/unusable kernel header file <linux/netfilter/xt_set.h>])],
-                [[#include <libipset/linux_ip_set.h>]])])
-            AC_CHECK_HEADERS([linux/netfilter/xt_set.h], [], [USE_LIBIPSET=No], [$EXTRA_INCLUDE])
-  
+                ], [USE_LIBIPSET=No],
+                [[#include <libipset/linux_ip_set.h>]])
+	      ]
+	    )
+ 	  fi
+
+	  if test $USE_LIBIPSET = Yes; then
             AC_DEFINE([_HAVE_LIBIPSET_], [ 1 ], [Define to 1 if have ipset library])
             $PKG_CONFIG --exists libipset
             if test $? -eq 0; then
@@ -769,20 +773,20 @@ if test .${enable_libiptc} != .no -a .$enable_vrrp != .no; then
               add_build_opt([LIBIPSET])
 	    fi
 
-	    dnl - xt_set_info_match first introduced in Linux 2.6.39
+	    dnl -- xt_set_info_match first introduced in Linux 2.6.39 (initial implementation of ipsets)
             dnl -- xt_set_info_match_v1 declared since Linux 3.1
             AC_CHECK_MEMBER([struct xt_set_info_match_v1.match_set.index], [AC_DEFINE([HAVE_XT_SET_INFO_MATCH_V1], [ 1 ], [Define to 1 if have struct xt_set_info_match_v1])], [],
               [
                 $EXTRA_INCLUDE
                 #include <linux/netfilter/xt_set.h>
               ])
-            dnl -- xt_set_info_match_v1 declared since Linux 3.10
+            dnl -- xt_set_info_match_v3 declared since Linux 3.10
             AC_CHECK_MEMBER([struct xt_set_info_match_v3.match_set.index], [AC_DEFINE([HAVE_XT_SET_INFO_MATCH_V3], [ 1 ], [Define to 1 if have struct xt_set_info_match_v3])], [],
               [
                 $EXTRA_INCLUDE
                 #include <linux/netfilter/xt_set.h>
               ])
-            dnl -- xt_set_info_match_v1 declared since Linux 3.19
+            dnl -- xt_set_info_match_v4 declared since Linux 3.19
             AC_CHECK_MEMBER([struct xt_set_info_match_v4.match_set.index], [AC_DEFINE([HAVE_XT_SET_INFO_MATCH_V4], [ 1 ], [Define to 1 if have struct xt_set_info_match_v4])], [],
               [
                 $EXTRA_INCLUDE
@@ -1019,12 +1023,23 @@ AC_CHECK_DECL([IPVS_SVC_ATTR_PE_NAME],
    ],
    [], [[#include <linux/ip_vs.h>]])
 
+dnl ----[ Checks for O_PATH support ]----
+# Introduced in Linux 2.6.39
+SAV_CFLAGS="$CFLAGS"
+CFLAGS="$CFLAGS -D_GNU_SOURCE"
+AC_CHECK_DECLS([O_PATH],
+  [
+    add_build_opt([O_PATH])
+    add_to_var([KA_CFLAGS], ["-D_GNU_SOURCE"])
+  ], [],[[#include <fcntl.h>]])
+CFLAGS="$SAV_CFLAGS"
+
 dnl ----[ Check for GLOB_BRACE support ]----
 AC_CHECK_DECLS([GLOB_BRACE], [add_build_opt([GLOB_BRACE])], [], [[#include <glob.h>]])
 
 dnl ----[ Do we want v1.3.6 and earlier VRRPv3 unicast checksum compatibility support ]----
 UNICAST_CHKSUM_COMPAT_SUPPORT=No
-if test .$enable_chksum_compat != .no; then
+if test .$enable_checksum_compat != .no; then
   UNICAST_CHKSUM_COMPAT_SUPPORT=Yes
   AC_DEFINE([_WITH_UNICAST_CHKSUM_COMPAT_], [ 1 ], [Define to 1 to enable v1.3.6 and earlier VRRPv3 unicast checksum compatibility])
   add_build_opt([OLD_CHKSUM_COMPAT])
@@ -1162,7 +1177,7 @@ if test "$enable_snmp" = yes -o \
   fi
   if test ${VRRP_SUPPORT} != Yes -a \
           ${SNMP_VRRP_SUPPORT} = Yes; then
-    AC_MSG_ERROR([KEEPALIVED SNMP support requires VRRP])
+    AC_MSG_ERROR([VRRP SNMP support requires VRRP])
   fi
   if test ${IPVS_SUPPORT} = No -a \
           ${SNMP_CHECKER_SUPPORT} = Yes; then
@@ -1180,8 +1195,8 @@ if test $SNMP_SUPPORT = Yes; then
   add_build_opt([SNMP])
 fi
 if test $SNMP_VRRP_SUPPORT = Yes; then
-  AC_DEFINE([_WITH_SNMP_KEEPALIVED_], [ 1 ], [Define to 1 to have keepalived SNMP VRRP support])
-  add_build_opt([SNMP_KEEPALIVED])
+  AC_DEFINE([_WITH_SNMP_VRRP_], [ 1 ], [Define to 1 to have keepalived SNMP VRRP support])
+  add_build_opt([SNMP_VRRP])
 fi
 if test $SNMP_CHECKER_SUPPORT = Yes; then
   AC_DEFINE([_WITH_SNMP_CHECKER_], [ 1 ], [Define to 1 to have keepalived SNMP checker support])

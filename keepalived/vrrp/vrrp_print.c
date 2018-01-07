@@ -19,6 +19,7 @@
  *              2 of the License, or (at your option) any later version.
  *
  * Copyright (C) 2012 John Southworth, <john.southworth@vyatta.com>
+ * Copyright (C) 2015-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -27,6 +28,7 @@
 #include "vrrp.h"
 #include "vrrp_data.h"
 #include "vrrp_print.h"
+#include "vrrp_ipaddress.h"
 #ifdef _HAVE_FIB_ROUTING_
 #include "vrrp_iproute.h"
 #include "vrrp_iprule.h"
@@ -245,19 +247,20 @@ vrrp_print(FILE *file, void *data)
 	fprintf(file, "   VRRP Version = %d\n", vrrp->version);
 	if (vrrp->family == AF_INET6)
 		fprintf(file, "   Using Native IPv6\n");
+	fprintf(file, "   State = ");
 	if (vrrp->state == VRRP_STATE_BACK) {
-		fprintf(file, "   State = BACKUP\n");
+		fprintf(file, "BACKUP\n");
 		fprintf(file, "   Master router = %s\n",
 			inet_sockaddrtos(&vrrp->master_saddr));
 		fprintf(file, "   Master priority = %d\n",
 			vrrp->master_priority);
 	}
 	else if (vrrp->state == VRRP_STATE_FAULT)
-		fprintf(file, "   State = FAULT\n");
+		fprintf(file, "FAULT\n");
 	else if (vrrp->state == VRRP_STATE_MAST)
-		fprintf(file, "   State = MASTER\n");
+		fprintf(file, "MASTER\n");
 	else
-		fprintf(file, "   State = %d\n", vrrp->state);
+		fprintf(file, "%d\n", vrrp->state);
 	ctime_r(&vrrp->last_transition.tv_sec, time_str);
 	time_str[sizeof(time_str)-2] = '\0';	/* Remove '\n' char */
 	fprintf(file, "   Last transition = %ld (%s)\n",

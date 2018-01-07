@@ -19,7 +19,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -284,7 +284,9 @@ vrrp_state_handler(vector_t *strvec)
 
 	if (!strcmp(str, "MASTER")) {
 		vrrp->wantstate = VRRP_STATE_MAST;
+#ifdef _WITH_SNMP_VRRP_
 		vrrp->init_state = VRRP_STATE_MAST;
+#endif
 	}
 	else if (strcmp(str, "BACKUP"))
 		log_message(LOG_INFO,"(%s): unknown state '%s', defaulting to BACKUP", vrrp->iname, str);

@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2012 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 /*
@@ -108,7 +108,7 @@
 
 #include "snmp.h"
 
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 /* VRRP SNMP defines */
 #define VRRP_OID KEEPALIVED_OID, 2
 
@@ -457,7 +457,7 @@ sprint_oid(char *str, oid* oid, int len)
 }
 #endif
 
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 /* Convert VRRP state to SNMP state */
 static int
 vrrp_snmp_state(int state)
@@ -2382,12 +2382,12 @@ static struct variable8 vrrp_vars[] = {
 	 vrrp_snmp_rule, 3, {8, 1, 28}},
 	{VRRP_SNMP_RULE_TUNNELID_LOW, ASN_UNSIGNED, RONLY,
 	 vrrp_snmp_rule, 3, {8, 1, 29}},
-#endif
 #if HAVE_DECL_FRA_UID_RANGE
 	{VRRP_SNMP_RULE_UID_RANGE_START, ASN_UNSIGNED, RONLY,
 	 vrrp_snmp_rule, 3, {8, 1, 30}},
 	{VRRP_SNMP_RULE_UID_RANGE_END, ASN_UNSIGNED, RONLY,
 	 vrrp_snmp_rule, 3, {8, 1, 31}},
+#endif
 #endif
 
 	/* vrrpScriptTable */
@@ -3944,7 +3944,7 @@ vrrp_snmp_agent_init(const char *snmp_socket)
 	/* We let the check process handle the global OID if it is running and with snmp */
 	snmp_agent_init(snmp_socket, vrrp_handles_global_oid());
 
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 	if (global_data->enable_snmp_keepalived)
 		snmp_register_mib(vrrp_oid, OID_LENGTH(vrrp_oid), "KEEPALIVED-VRRP",
 				  (struct variable *)vrrp_vars,
@@ -3970,7 +3970,7 @@ vrrp_snmp_agent_init(const char *snmp_socket)
 void
 vrrp_snmp_agent_close(void)
 {
-#ifdef _WITH_SNMP_KEEPALIVED_
+#ifdef _WITH_SNMP_VRRP_
 	if (global_data->enable_snmp_keepalived)
 		snmp_unregister_mib(vrrp_oid, OID_LENGTH(vrrp_oid));
 #endif
