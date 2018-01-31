@@ -200,8 +200,8 @@
 /* Define to 1 if ipset supports iface type */
 #undef HAVE_IPSET_ATTR_IFACE
 
-/* Define to 1 if you have the <json-c/json.h> header file. */
-#undef HAVE_JSON_C_JSON_H
+/* Define to 1 if you have the <json.h> header file. */
+#undef HAVE_JSON_H
 
 /* Define to 1 if you have the `crypto' library (-lcrypto). */
 #undef HAVE_LIBCRYPTO
@@ -477,6 +477,9 @@
 /* Define to 1 if libipvs can use netlink */
 #undef LIBIPVS_USE_NL
 
+/* The type of parameter __line passed to __assert_fail() */
+#undef LINE_type
+
 /* Define to 1 if <linux/netlink.h> needs <sys/socket.h> */
 #undef NETLINK_H_NEEDS_SYS_SOCKET_H
 
@@ -586,6 +589,9 @@
 
 /* Define to 1 to log malloc/free checks to syslog */
 #undef _MEM_CHECK_LOG_
+
+/* Define to 1 to build with smtp-alert debugging support */
+#undef _SMTP_ALERT_DEBUG_
 
 /* Define to 1 to have keepalived send RFC6257 SNMP responses for VRRPv2
    instances */

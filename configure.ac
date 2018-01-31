@@ -88,7 +88,7 @@ m4_ifndef([AS_VAR_COPY],
 
 dnl ----[ Process this file with autoconf to produce a configure script ]----
 AC_PREREQ([2.63])
-AC_INIT([Keepalived], [1.4.0], [keepalived-devel@lists.sourceforge.net], [], [http://www.keepalived.org/])
+AC_INIT([Keepalived], [1.4.1], [keepalived-devel@lists.sourceforge.net], [], [http://www.keepalived.org/])
 AM_INIT_AUTOMAKE([-Wall -Werror -Woverride foreign])
 
 AC_CONFIG_SRCDIR([keepalived/core/main.c])
@@ -186,6 +186,8 @@ AC_ARG_ENABLE(mem-check-log,
   [AS_HELP_STRING([--enable-mem-check-log], [compile with memory alloc checking writing to syslog])])
 AC_ARG_ENABLE(debug,
   [AS_HELP_STRING([--enable-debug], [compile with debugging flags])])
+AC_ARG_ENABLE(smtp-alert-debug,
+  [AS_HELP_STRING([--enable-smtp-alert-debug], [compile with smtp-alert debugging])])
 AC_ARG_ENABLE(stacktrace,
   [AS_HELP_STRING([--enable-stacktrace], [compile with stacktrace support])])
 AC_ARG_ENABLE(profile,
@@ -373,6 +375,19 @@ AC_FUNC_REALLOC
 AC_CHECK_FUNCS([dup2 getcwd gettimeofday memmove memset select setenv socket strcasecmp strchr strdup strerror strpbrk strstr strtol strtoul uname])
 dnl - pipe2() since Linux 2.6.27 and glibc 2.9.
 AC_CHECK_FUNCS([pipe2], [add_build_opt([PIPE2])])
+
+# glibc uses unsigned int as 3rd parameter to __assert_fail(), musl uses int.
+AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
+  #include <assert.h>
+  #include <stdlib.h>
+
+  void __assert_fail(const char * a, const char *b, unsigned int l, const char *c)
+  {
+    exit(a[0] + b[0] + c[0] + l == 0);
+  }
+  ]])],
+  [LINE_type="unsigned int"], [LINE_type="int"])
+AC_DEFINE_UNQUOTED([LINE_type], [ $LINE_type ], [The type of parameter __line passed to __assert_fail()])
 
 dnl - Do we want to override dynamic/static linking?
 if test -n "$enable_dynamic_linking"; then
@@ -990,7 +1005,11 @@ if test "$enable_vrrp" != no; then
 
   dnl ----[ Json output or not ? ]----
   if test "${enable_json}" = yes; then
-    AC_CHECK_HEADERS(json-c/json.h,,AC_MSG_ERROR([unable to find json-c/json.h]))
+    JSON_HEADERS=$($PKG_CONFIG --cflags-only-I json-c)
+    SAV_CPPFLAGS="$CPPFLAGS"
+    CPPFLAGS="$CPPFLAGS $JSON_HEADERS"
+    AC_CHECK_HEADERS(json.h,,AC_MSG_ERROR([unable to find json.h]))
+    CPPFLAGS="$SAV_CPPFLAGS"
     AC_DEFINE([_WITH_JSON_], [ 1 ], [Define to 1 to build with json output support])
     add_pkg_config([json-c])
     ENABLE_JSON=Yes
@@ -1339,6 +1358,15 @@ else
 fi
 AM_CONDITIONAL([DEBUG], [test $ENABLE_DEBUG = Yes])
 
+dnl ----[ smtp-alert debugging or not ? ]----
+if test "${enable_smtp_alert_debug}" = yes; then
+  AC_DEFINE([_SMTP_ALERT_DEBUG_], [ 1 ], [Define to 1 to build with smtp-alert debugging support])
+  ENABLE_SMTP_ALERT_DEBUG=Yes
+  add_build_opt([SMTP_ALERT_DEBUG])
+else
+  ENABLE_SMTP_ALERT_DEBUG=No
+fi
+
 dnl ----[ Stacktrace support or not ? ]----
 if test "${enable_stacktrace}" = yes; then
   AC_DEFINE([_WITH_STACKTRACE_], [ 1 ], [Define to 1 to build with stacktrace support])
@@ -1457,6 +1485,7 @@ if test ${DBUS_SUPPORT} = Yes; then
 fi
 echo "SHA1 support             : ${SHA1_SUPPORT}"
 echo "Use Debug flags          : ${ENABLE_DEBUG}"
+echo "smtp-alert debugging     : ${ENABLE_SMTP_ALERT_DEBUG}"
 echo "Use Json output          : ${ENABLE_JSON}"
 echo "Stacktrace support       : ${ENABLE_STACKTRACE}"
 echo "Memory alloc check       : ${MEM_CHECK}"
