@@ -2547,8 +2547,7 @@ vrrp_complete_init(void)
 		next = e->next;
 		sgroup = ELEMENT_DATA(e);
 		vrrp_sync_set_group(sgroup);
-		if (LIST_ISEMPTY(sgroup->index_list) ||
-			LIST_SIZE(sgroup->index_list) <= 1) {
+		if (LIST_ISEMPTY(sgroup->index_list)) {
 			free_list_element(vrrp_data->vrrp_sync_group, e);
 			continue;
 		}
@@ -2785,7 +2784,7 @@ restore_vrrp_state(vrrp_t *old_vrrp, vrrp_t *vrrp)
 	bool added_ip_addr = false;
 
 	/* Keep VRRP state, ipsec AH seq_number */
-	vrrp->state = old_vrrp->state;
+	vrrp->state = old_vrrp->state == VRRP_STATE_MAST ? VRRP_STATE_MASTER_RELOAD : old_vrrp->state;
 	vrrp->wantstate = old_vrrp->state;
 	if (!old_vrrp->sync)
 		vrrp->effective_priority = old_vrrp->effective_priority;
