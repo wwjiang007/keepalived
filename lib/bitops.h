@@ -23,7 +23,10 @@
 #ifndef _BITOPS_H
 #define _BITOPS_H
 
+#include "config.h"
+
 #include <limits.h>
+#include <stdbool.h>
 
 /* Defines */
 #define BIT_PER_LONG	(CHAR_BIT * sizeof(unsigned long))
@@ -41,9 +44,19 @@ static inline void __clear_bit(unsigned idx, unsigned long *bmap)
 	bmap[BIT_WORD(idx)] &= ~BIT_MASK(idx);
 }
 
-static inline bool __test_bit(unsigned idx, unsigned long *bmap)
+static inline bool __test_bit(unsigned idx, const unsigned long *bmap)
 {
 	return !!(bmap[BIT_WORD(idx)] & BIT_MASK(idx));
+}
+
+static inline bool __test_and_set_bit(unsigned idx, unsigned long *bmap)
+{
+	if (__test_bit(idx, bmap))
+		return true;
+
+	__set_bit(idx, bmap);
+
+	return false;
 }
 
 /* Bits */
@@ -60,9 +73,12 @@ enum global_bits {
 	DONT_RELEASE_IPVS_BIT,
 #endif
 	LOG_DETAIL_BIT,
+	LOG_EXTRA_DETAIL_BIT,
 	DONT_RESPAWN_BIT,
 #ifdef _MEM_CHECK_
+#ifdef _MEM_ERR_DEBUG_
 	MEM_ERR_DETECT_BIT,
+#endif
 #ifdef _MEM_CHECK_LOG_
 	MEM_CHECK_LOG_BIT,
 #endif
@@ -70,6 +86,7 @@ enum global_bits {
 #ifdef _WITH_LVS_
 	LOG_ADDRESS_CHANGES,
 #endif
+	CONFIG_TEST_BIT,
 };
 
 #endif

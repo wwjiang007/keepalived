@@ -30,6 +30,7 @@
 #include <math.h>
 #include <arpa/inet.h>
 #include <stdint.h>
+#include <ctype.h>
 
 #include "logger.h"
 #include "vrrp_ip_rule_route_parser.h"
@@ -37,15 +38,17 @@
 #if HAVE_DECL_RTA_ENCAP
 #include "vrrp_iproute.h"
 #endif
+#include "parser.h"
+#include "memory.h"
 
 bool
-get_realms(uint32_t *realms, char *str)
+get_realms(uint32_t *realms, const char *str)
 {
 	uint32_t val, val1;
 	char *end;
 
 	if ((end = strchr(str,'/')))
-		*end = '\0';
+		str = STRNDUP(str,  end - str);
 
 	if (!find_rttables_realms(str, &val))
 		goto err;
@@ -57,7 +60,7 @@ get_realms(uint32_t *realms, char *str)
 		val <<= 16;
 		val |= val1;
 
-		*end = '/';
+		FREE_CONST(str);
 	}
 
 	*realms = val;
@@ -66,7 +69,7 @@ get_realms(uint32_t *realms, char *str)
 
 err:
 	if (end)
-		*end = '/';
+		FREE_CONST(str);
 	return true;
 }
 
@@ -74,106 +77,98 @@ err:
 bool
 get_u8(uint8_t *val, const char *str, uint8_t max, const char* errmsg)
 {
-	char *end;
-	unsigned long t_val;
+	unsigned t_val;
 
-	t_val = strtoul(str, &end, 0);
-	if (*end == '\0' && t_val <= max) {
+	if (read_unsigned(str, &t_val, 0, max, false)) {
 		*val = (uint8_t)t_val;
 		return false;
 	}
 
-	log_message(LOG_INFO, errmsg, str);
+	report_config_error(CONFIG_GENERAL_ERROR, errmsg, str);
 	return true;
 }
 
 bool
 get_u16(uint16_t *val, const char *str, uint16_t max, const char* errmsg)
 {
-	char *end;
-	unsigned long t_val;
+	unsigned t_val;
 
-	/* strtoul can do "nasty" things with -ve unsigneds */
-	if (str[0] == '-')
-		return true;
-
-	t_val = strtoul(str, &end, 0);
-	if (*end == '\0' && t_val <= max) {
+	if (read_unsigned(str, &t_val, 0, max, false)) {
 		*val = (uint16_t)t_val;
 		return false;
 	}
 
-	log_message(LOG_INFO, errmsg, str);
+	report_config_error(CONFIG_GENERAL_ERROR, errmsg, str);
 	return true;
 }
 
 bool
 get_u32(uint32_t *val, const char *str, uint32_t max, const char* errmsg)
 {
-	char *end;
-	unsigned long t_val;
+	unsigned t_val;
 
-	/* strtoul can do "nasty" things with -ve unsigneds */
-	if (str[0] == '-')
-		return true;
-
-	t_val = strtoul(str, &end, 0);
-	if (*end == '\0' && t_val <= max) {
+	if (read_unsigned(str, &t_val, 0, max, false)) {
 		*val = (uint32_t)t_val;
 		return false;
 	}
 
-	log_message(LOG_INFO, errmsg, str);
+	report_config_error(CONFIG_GENERAL_ERROR, errmsg, str);
 	return true;
 }
 
 bool
 get_u64(uint64_t *val, const char *str, uint64_t max, const char* errmsg)
 {
-	char *end;
-	unsigned long long t_val;
+	uint64_t t_val;
 
-	/* strtoull can do "nasty" things with -ve unsigneds */
-	if (str[0] == '-')
-		return true;
-
-	t_val = strtoull(str, &end, 0);
-	if (*end == '\0' && t_val <= max) {
-		*val = t_val;
+	if (read_unsigned64(str, &t_val, 0, max, false)) {
+		*val = (uint64_t)t_val;
 		return false;
 	}
 
-	log_message(LOG_INFO, errmsg, str);
+	report_config_error(CONFIG_GENERAL_ERROR, errmsg, str);
 	return true;
 }
 
 bool
 get_time_rtt(uint32_t *val, const char *str, bool *raw)
 {
-	double t;
+	float t;
 	unsigned long res;
 	char *end;
+	size_t offset;
+	int ftype;
 
 	errno = 0;
 	if (strchr(str, '.') ||
-	    (strpbrk(str,"Ee" ) && !strpbrk(str, "xX"))) {
-		t = strtod(str, &end);
-		if (t <= 0.0)
-			return true;
+	    (strpbrk(str, "Ee") && !strpbrk(str, "xX"))) {
+		t = strtof(str, &end);
 
-		/* no digits? */
+		/* no digits or extra characters */
 		if (end == str)
 			return true;
 
-		/* overflow */
-		if (t == HUGE_VAL && errno == ERANGE)
+		ftype = fpclassify(t);
+		if (ftype != FP_ZERO && ftype != FP_SUBNORMAL) {
+			if (errno == ERANGE) /* overflow */
+				return true;
+			if (ftype != FP_NORMAL) /* NaN, infinity */
+				return true;
+		}
+		else
+			t = 0.0F;	/* in case FP_SUBNORMAL */
+
+		if (t <= 0.0F)
 			return true;
 
-		if (t >=UINT32_MAX)
+		if (t >= UINT32_MAX)
 			return true;
 	} else {
+		/* Skip whitespace */
+		offset = strspn(str, WHITE_SPACE);
+
 		/* strtoul does "nasty" things with negative numbers */
-		if (str[0] == '-')
+		if (str[offset] == '-')
 			return true;
 
 		res = strtoul(str, &end, 0);
@@ -186,10 +181,10 @@ get_time_rtt(uint32_t *val, const char *str, bool *raw)
 		if (res == ULONG_MAX && errno == ERANGE)
 			return true;
 
-		if (res >= UINT32_MAX)
+		if (res > UINT32_MAX)
 			return true;
 
-		t = (double)res;
+		t = (float)res;
 	}
 
 	if (*end) {
@@ -197,8 +192,8 @@ get_time_rtt(uint32_t *val, const char *str, bool *raw)
 		if (!strcasecmp(end, "s") ||
 		    !strcasecmp(end, "sec") ||
 		    !strcasecmp(end, "secs")) {
-			if (t >= UINT32_MAX / 1000)
-				return -1;
+			if (t * 1000U >= UINT32_MAX)
+				return false;
 			t *= 1000;
 		}
 		else if (strcasecmp(end, "ms") &&
@@ -212,7 +207,7 @@ get_time_rtt(uint32_t *val, const char *str, bool *raw)
 	*val = (uint32_t)t;
 	if (*val < t)
 		(*val)++;
-	
+
 	return false;
 }
 
@@ -226,10 +221,16 @@ get_addr64(uint64_t *ap, const char *cp)
 		uint64_t v64;
 	} val;
 
+	/* Skip leading whitespace */
+	cp += strspn(cp, WHITE_SPACE);
+
 	val.v64 = 0;
 	for (i = 0; i < 4; i++) {
 		unsigned long n;
 		char *endp;
+
+		if (!isxdigit(*cp))
+			return true;	/* Not a hex digit */
 
 		n = strtoul(cp, &endp, 16);
 		if (n > 0xffff)
@@ -256,7 +257,7 @@ get_addr64(uint64_t *ap, const char *cp)
 	return false;
 }
 
-#if HAVE_DECL_LWTUNNEL_ENCAP_MPLS
+#if HAVE_DECL_RTA_ENCAP && HAVE_DECL_LWTUNNEL_ENCAP_MPLS
 bool
 parse_mpls_address(const char *str, encap_mpls_t *mpls)
 {
@@ -266,8 +267,14 @@ parse_mpls_address(const char *str, encap_mpls_t *mpls)
 
 	mpls->num_labels = 0;
 
+	/* Skip leading whitespace */
+	str += strspn(str, WHITE_SPACE);
+
 	for (count = 0; count < MAX_MPLS_LABELS; count++) {
 		if (str[0] == '-')
+			return true;
+
+		if (strspn(str, WHITE_SPACE))	/* No embedded whitespace */
 			return true;
 
 		label = strtoul(str, &endp, 0);
@@ -294,6 +301,7 @@ parse_mpls_address(const char *str, encap_mpls_t *mpls)
 
 		str = endp + 1;
 	}
+
 	/* The address was too long */
 	return true;
 }

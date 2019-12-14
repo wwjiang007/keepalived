@@ -160,10 +160,8 @@
 #include <errno.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include <stdio.h>
 #include <sys/mount.h>
-#include <stdlib.h>
 #include <stdbool.h>
 
 #ifndef HAVE_SETNS
@@ -176,18 +174,22 @@
 
 #include <sys/syscall.h>
 
-#include "namespaces.h"
-#include "main.h"
+/* For some reason Centos 6.5 doesn't define SYS_setns */
+#ifndef SYS_setns
+#define SYS_setns __NR_setns
+#endif
 
 #ifndef MS_SLAVE	/* Since glibc 2.12, but Linux since 2.6.15 */
 #include <linux/fs.h>
 #endif
-int setns(int fd, int nstype)
+static int
+setns(int fd, int nstype)
 {
 	return (int)syscall(SYS_setns, fd, nstype);
 }
 #endif
 
+#include "namespaces.h"
 #include "memory.h"
 #include "logger.h"
 #include "pidfile.h"
@@ -207,19 +209,18 @@ static void
 set_run_mount(const char *net_namespace)
 {
 	/* /var/run/keepalived/NAMESPACE */
-	mount_dirname = MALLOC(strlen(PID_DIR PACKAGE "/") + 1 + strlen(net_namespace));
+	mount_dirname = MALLOC(strlen(KEEPALIVED_PID_DIR) + 1 + strlen(net_namespace));
 	if (!mount_dirname) {
 		log_message(LOG_INFO, "Unable to allocate memory for pid file dirname");
 		return;
 	}
 
-	strcpy(mount_dirname, PID_DIR PACKAGE "/");
+	strcpy(mount_dirname, KEEPALIVED_PID_DIR);
 	strcat(mount_dirname, net_namespace);
 
 	if (mkdir(mount_dirname, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH) && errno != EEXIST) {
 		log_message(LOG_INFO, "Unable to create directory %s", mount_dirname);
-		FREE(mount_dirname);
-		mount_dirname = NULL;
+		free_dirname();
 		return;
 	}
 
@@ -246,7 +247,7 @@ unmount_run(void)
 	if (mount_dirname) {
 		if (rmdir(mount_dirname) && errno != ENOTEMPTY && errno != EBUSY)
 			log_message(LOG_INFO, "unlink of %s failed - error (%d) '%s'", mount_dirname, errno, strerror(errno));
-		FREE(mount_dirname);
+		free_dirname();
 	}
 }
 

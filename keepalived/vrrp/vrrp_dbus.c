@@ -24,6 +24,21 @@
  * and https://developer.gnome.org/gio/stable/GDBusConnection.html#gdbus-server
  * for examples of coding.
  *
+ * Create a general /org/keepalived/Vrrp1/Vrrp DBus
+ * object and a /org/keepalived/Vrrp1/Instance/#interface#/#group# object for
+ * each VRRP instance.
+ * Interface org.keepalived.Vrrp1.Vrrp implements methods PrintData,
+ * PrintStats and signal VrrpStopped.
+ * Interface com.keepalived.Vrrp1.Instance implements method SendGarp
+ * (sends a single Gratuitous ARP from the given Instance),
+ * signal VrrpStatusChange, and properties Name and State (retrievable
+ * through calls to org.freedesktop.DBus.Properties.Get)
+ *
+ * Interface files need to be installed in /usr/share/dbus-1/interfaces/
+ * A policy file, which determines who has access to the service, is
+ * installed in /etc/dbus-1/system.d/. Sources for the policy and interface
+ * files are in keepalived/dbus.
+ *
  * To test the DBus service run a command like: dbus-send --system --dest=org.keepalived.Vrrp1 --print-reply object interface.method type:argument
  * e.g.
  * dbus-send --system --dest=org.keepalived.Vrrp1 --print-reply /org/keepalived/Vrrp1/Vrrp org.keepalived.Vrrp1.Vrrp.PrintData
@@ -38,26 +53,26 @@
 
 #include "config.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <semaphore.h>
-#include <signal.h>
 #include <gio/gio.h>
 #include <ctype.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <sys/types.h>
+#include <stdlib.h>
 #include <stdint.h>
 
 #include "vrrp_dbus.h"
 #include "vrrp_data.h"
-#include "vrrp_if.h"
 #include "vrrp_print.h"
 #include "global_data.h"
 #include "main.h"
-#include "memory.h"
 #include "logger.h"
-#include "timer.h"
+#include "utils.h"
+#ifdef THREAD_DUMP
 #include "scheduler.h"
+#endif
 
 typedef enum dbus_action {
 	DBUS_ACTION_NONE,
@@ -90,6 +105,16 @@ typedef struct dbus_queue_ent {
 	GVariant *args;
 } dbus_queue_ent_t;
 
+#define DBUS_SERVICE_NAME			"org.keepalived.Vrrp1"
+#define DBUS_VRRP_INTERFACE			"org.keepalived.Vrrp1.Vrrp"
+#define DBUS_VRRP_OBJECT_ROOT			"/org/keepalived/Vrrp1"
+#define DBUS_VRRP_INSTANCE_PATH_DEFAULT_LENGTH	8
+#define DBUS_VRRP_INSTANCE_INTERFACE		"org.keepalived.Vrrp1.Instance"
+#define DBUS_VRRP_INTERFACE_FILE_PATH		"/usr/share/dbus-1/interfaces/org.keepalived.Vrrp1.Vrrp.xml"
+#define DBUS_VRRP_INSTANCE_INTERFACE_FILE_PATH	"/usr/share/dbus-1/interfaces/org.keepalived.Vrrp1.Instance.xml"
+
+static bool dbus_running;
+
 /* Global file variables */
 static GDBusNodeInfo *vrrp_introspection_data = NULL;
 static GDBusNodeInfo *vrrp_instance_introspection_data = NULL;
@@ -99,7 +124,8 @@ static GMainLoop *loop;
 
 /* Data passing between main vrrp thread and dbus thread */
 dbus_queue_ent_t *ent_ptr;
-static int dbus_in_pipe[2], dbus_out_pipe[2];
+static int dbus_in_pipe[2] = {-1, -1};
+static int dbus_out_pipe[2] = {-1, -1};
 static sem_t thread_end;
 
 /* The only characters that are valid in a dbus path are A-Z, a-z, 0-9, _ */
@@ -120,7 +146,7 @@ set_valid_path(char *valid_path, const char *path)
 	return valid_path;
 }
 
-static bool
+static bool __attribute__ ((pure))
 valid_path_cmp(const char *path, const char *valid_path)
 {
 	for ( ; *path && *valid_path; path++, valid_path++) {
@@ -157,15 +183,11 @@ state_str(int state)
 		return "Master";
 	case VRRP_STATE_FAULT:
 		return "Fault";
-	case VRRP_STATE_GOTO_MASTER:
-		return "Goto master";
-	case VRRP_STATE_GOTO_FAULT:
-		return "Goto fault";
 	}
 	return "Unknown";
 }
 
-static vrrp_t *
+static vrrp_t * __attribute__ ((pure))
 get_vrrp_instance(const char *ifname, int vrid, int family)
 {
 	element e;
@@ -180,33 +202,39 @@ get_vrrp_instance(const char *ifname, int vrid, int family)
 		if (vrrp->vrid == vrid &&
 		    vrrp->family == family &&
 		    !valid_path_cmp(IF_BASE_IFP(vrrp->ifp)->ifname, ifname))
-				return vrrp;
+			return vrrp;
 	}
 
 	return NULL;
 }
 
 static gboolean
-unregister_object(gpointer key, gpointer value, __attribute__((unused)) gpointer user_data)
+unregister_object(const void * const key, gpointer value, __attribute__((unused)) gpointer user_data)
 {
 	if (g_hash_table_remove(objects, key))
 		return g_dbus_connection_unregister_object(global_connection, GPOINTER_TO_UINT(value));
 	return false;
 }
 
-static gchar *
+static gboolean
+remove_object(__attribute__((unused)) gpointer key, gpointer value, __attribute__((unused)) gpointer user_data)
+{
+	return g_dbus_connection_unregister_object(global_connection, GPOINTER_TO_UINT(value));
+}
+
+static gchar * __attribute__ ((malloc))
 dbus_object_create_path_vrrp(void)
 {
 	return g_strconcat(DBUS_VRRP_OBJECT_ROOT,
 #if HAVE_DECL_CLONE_NEWNET
-			  (network_namespace) ? "/" : "", (network_namespace) ? network_namespace : "",
+			  global_data->network_namespace ? "/" : "", global_data->network_namespace ? global_data->network_namespace : "",
 #endif
-			  (instance_name) ? "/" : "", (instance_name) ? instance_name : "",
+			  global_data->instance_name ? "/" : "", global_data->instance_name ? global_data->instance_name : "",
 
 			  "/Vrrp", NULL);
 }
 
-static gchar *
+static gchar * __attribute__ ((malloc))
 dbus_object_create_path_instance(const gchar *interface, int vrid, sa_family_t family)
 {
 	gchar *object_path;
@@ -217,9 +245,9 @@ dbus_object_create_path_instance(const gchar *interface, int vrid, sa_family_t f
 
 	object_path = g_strconcat(DBUS_VRRP_OBJECT_ROOT,
 #if HAVE_DECL_CLONE_NEWNET
-				  (network_namespace) ? "/" : "", (network_namespace) ? network_namespace : "",
+				  global_data->network_namespace ? "/" : "", global_data->network_namespace ? global_data->network_namespace : "",
 #endif
-				  (instance_name) ? "/" : "", (instance_name) ? instance_name : "",
+				  global_data->instance_name ? "/" : "", global_data->instance_name ? global_data->instance_name : "",
 
 				  "/Instance/",
 				  standardized_name, "/", vrid_str,
@@ -234,19 +262,19 @@ static dbus_queue_ent_t *
 process_method_call(dbus_queue_ent_t *ent)
 {
 	ssize_t ret;
+	char buf = 0;
 
 	if (!ent)
 		return NULL;
 
 	/* Tell the main thread that a queue entry is waiting. Any data works */
 	ent_ptr = ent;
-	if (write(dbus_in_pipe[1], ent, 1) != 1)
+	if (write(dbus_in_pipe[1], &buf, 1) != 1)
 		log_message(LOG_INFO, "Write from DBus thread to main thread failed");
 
 	/* Wait for a response */
-	while ((ret = read(dbus_out_pipe[0], ent, 1)) == -1 && errno == EINTR) {
+	while ((ret = read(dbus_out_pipe[0], &buf, 1)) == -1 && check_EINTR(errno))
 		log_message(LOG_INFO, "dbus_out_pipe read returned EINTR");
-	}
 	if (ret == -1)
 		log_message(LOG_INFO, "DBus response read error - errno = %d", errno);
 
@@ -275,19 +303,22 @@ get_interface_ids(const gchar *object_path, gchar *interface, uint8_t *vrid, uin
 {
 	int path_length = DBUS_VRRP_INSTANCE_PATH_DEFAULT_LENGTH;
 	gchar **dirs;
+	char *endptr;
 
 #if HAVE_DECL_CLONE_NEWNET
-	if(network_namespace)
+	if(global_data->network_namespace)
 		path_length++;
 #endif
-	if(instance_name)
+	if(global_data->instance_name)
 		path_length++;
 
 	/* object_path will have interface, vrid and family as
 	 * the third to last, second to last and last levels */
 	dirs = g_strsplit(object_path, "/", path_length);
 	strcpy(interface, dirs[path_length-3]);
-	*vrid = (uint8_t)atoi(dirs[path_length-2]);
+	*vrid = (uint8_t)strtoul(dirs[path_length-2], &endptr, 10);
+	if (*endptr)
+		log_message(LOG_INFO, "Dbus unexpected characters '%s' at end of number '%s'", endptr, dirs[path_length-2]);
 	*family = !g_strcmp0(dirs[path_length-1], "IPv4") ? AF_INET : !g_strcmp0(dirs[path_length-1], "IPv6") ? AF_INET6 : AF_UNSPEC;
 
 	/* We are finished with all the object_path strings now */
@@ -296,13 +327,13 @@ get_interface_ids(const gchar *object_path, gchar *interface, uint8_t *vrid, uin
 
 /* handles reply to org.freedesktop.DBus.Properties.Get method on any object*/
 static GVariant *
-handle_get_property(__attribute__((unused)) GDBusConnection  *connection,
-		    __attribute__((unused)) const gchar      *sender,
-		    const gchar      *object_path,
-		    const gchar      *interface_name,
-		    const gchar      *property_name,
-		    GError          **error,
-		    __attribute__((unused)) gpointer          user_data)
+handle_get_property(__attribute__((unused)) GDBusConnection *connection,
+		    __attribute__((unused)) const gchar     *sender,
+					    const gchar     *object_path,
+					    const gchar     *interface_name,
+					    const gchar     *property_name,
+					    GError	   **error,
+		    __attribute__((unused)) gpointer	     user_data)
 {
 	GVariant *ret = NULL;
 	dbus_queue_ent_t ent;
@@ -340,16 +371,16 @@ handle_get_property(__attribute__((unused)) GDBusConnection  *connection,
 /* handles method_calls on any object */
 static void
 handle_method_call(__attribute__((unused)) GDBusConnection *connection,
-		   __attribute__((unused)) const gchar           *sender,
-		   const gchar           *object_path,
-		   const gchar           *interface_name,
-		   const gchar           *method_name,
+		   __attribute__((unused)) const gchar	   *sender,
+					   const gchar	   *object_path,
+					   const gchar	   *interface_name,
+					   const gchar	   *method_name,
 #ifndef _WITH_DBUS_CREATE_INSTANCE_
 		   __attribute__((unused))
 #endif
 					   GVariant *parameters,
 		   GDBusMethodInvocation *invocation,
-		   __attribute__((unused)) gpointer               user_data)
+		   __attribute__((unused)) gpointer user_data)
 {
 #ifdef _WITH_DBUS_CREATE_INSTANCE_
 	char *iname;
@@ -445,7 +476,7 @@ static const GDBusInterfaceVTable interface_vtable =
 };
 
 static int
-dbus_create_object_params(char *instance_name, const char *interface_name, int vrid, sa_family_t family, bool log_success)
+dbus_create_object_params(const char *instance_name, const char *interface_name, int vrid, sa_family_t family, bool log_success)
 {
 	gchar *object_path;
 	GError *local_error = NULL;
@@ -467,7 +498,7 @@ dbus_create_object_params(char *instance_name, const char *interface_name, int v
 	}
 
 	if (instance) {
-		g_hash_table_insert(objects, instance_name, GUINT_TO_POINTER(instance));
+		g_hash_table_insert(objects, no_const_char_p(instance_name), GUINT_TO_POINTER(instance));
 		if (log_success)
 			log_message(LOG_INFO, "Added DBus object for instance %s on path %s", instance_name, object_path);
 	}
@@ -508,36 +539,36 @@ dbus_emit_signal(GDBusConnection *connection,
 static void
 on_bus_acquired(GDBusConnection *connection,
 		const gchar     *name,
-		__attribute__((unused)) gpointer         user_data)
+		__attribute__((unused)) gpointer user_data)
 {
 	global_connection = connection;
 	gchar *path;
+	vrrp_t *vrrp;
 	element e;
 	GError *local_error = NULL;
+	guint vrrp_guint;
 
-	log_message(LOG_INFO, "Acquired DBus bus %s\n", name);
+	log_message(LOG_INFO, "Acquired DBus bus %s", name);
 
 	/* register VRRP object */
 	path = dbus_object_create_path_vrrp();
-	guint vrrp = g_dbus_connection_register_object(connection, path,
+	vrrp_guint = g_dbus_connection_register_object(connection, path,
 							 vrrp_introspection_data->interfaces[0],
 							 &interface_vtable, NULL, NULL, &local_error);
-	g_hash_table_insert(objects, "__Vrrp__", GUINT_TO_POINTER(vrrp));
-	g_free(path);
+	g_hash_table_insert(objects, no_const_char_p("__Vrrp__"), GUINT_TO_POINTER(vrrp_guint));
 	if (local_error != NULL) {
 		log_message(LOG_INFO, "Registering VRRP object on %s failed: %s",
 			    path, local_error->message);
 		g_clear_error(&local_error);
 	}
+	g_free(path);
 
 	/* for each available VRRP instance, register an object */
 	if (LIST_ISEMPTY(vrrp_data->vrrp))
 		return;
 
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		vrrp_t * vrrp = ELEMENT_DATA(e);
+	LIST_FOREACH(vrrp_data->vrrp, vrrp, e)
 		dbus_create_object(vrrp);
-	}
 
 	/* Send a signal to say we have started */
 	path = dbus_object_create_path_vrrp();
@@ -545,19 +576,17 @@ on_bus_acquired(GDBusConnection *connection,
 	g_free(path);
 
 	/* Notify DBus of the state of our instances */
-	for (e = LIST_HEAD(vrrp_data->vrrp); e; ELEMENT_NEXT(e)) {
-		vrrp_t * vrrp = ELEMENT_DATA(e);
+	LIST_FOREACH(vrrp_data->vrrp, vrrp, e)
 		dbus_send_state_signal(vrrp);
-	}
 }
 
 /* run if bus name is acquired successfully */
 static void
 on_name_acquired(__attribute__((unused)) GDBusConnection *connection,
 		 const gchar     *name,
-		 __attribute__((unused)) gpointer         user_data)
+		 __attribute__((unused)) gpointer user_data)
 {
-	log_message(LOG_INFO, "Acquired the name %s on the session bus\n", name);
+	log_message(LOG_INFO, "Acquired the name %s on the session bus", name);
 }
 
 /* run if bus name or connection are lost */
@@ -566,28 +595,32 @@ on_name_lost(GDBusConnection *connection,
 	     const gchar     *name,
 	     __attribute__((unused)) gpointer user_data)
 {
-	log_message(LOG_INFO, "Lost the name %s on the session bus\n", name);
+	log_message(LOG_INFO, "Lost the name %s on the session bus", name);
 	global_connection = connection;
-	g_hash_table_foreach_remove(objects, unregister_object, NULL);
+	g_hash_table_foreach_remove(objects, remove_object, NULL);
 	objects = NULL;
 	global_connection = NULL;
 }
 
-static gchar*
-read_file(gchar* filepath)
+static const gchar*
+read_file(const gchar* filepath)
 {
 	FILE * f;
-	size_t length;
+	long length;
 	gchar *ret = NULL;
 
-	f = fopen(filepath, "rb");
+	f = fopen(filepath, "r");
 	if (f) {
 		fseek(f, 0, SEEK_END);
-		length = (size_t)ftell(f);
+		length = ftell(f);
+		if (length < 0) {
+			fclose(f);
+			return NULL;
+		}
 		fseek(f, 0, SEEK_SET);
 
 		/* We can't use MALLOC since it isn't thread safe */
-		ret = malloc(length + 1);
+		ret = MALLOC(length + 1);
 		if (ret) {
 			if (fread(ret, length, 1, f) != 1) {
 				log_message(LOG_INFO, "Failed to read all of %s", filepath);
@@ -605,7 +638,7 @@ read_file(gchar* filepath)
 static void *
 dbus_main(__attribute__ ((unused)) void *unused)
 {
-	gchar *introspection_xml;
+	const gchar *introspection_xml;
 	guint owner_id;
 	const char *service_name;
 
@@ -627,7 +660,7 @@ dbus_main(__attribute__ ((unused)) void *unused)
 	if (!introspection_xml)
 		return NULL;
 	vrrp_introspection_data = g_dbus_node_info_new_for_xml(introspection_xml, &error);
-	free(introspection_xml);
+	FREE_CONST(introspection_xml);
 	if (error != NULL) {
 		log_message(LOG_INFO, "Parsing DBus interface %s from file %s failed: %s",
 			    DBUS_VRRP_INTERFACE, DBUS_VRRP_INTERFACE_FILE_PATH, error->message);
@@ -639,7 +672,7 @@ dbus_main(__attribute__ ((unused)) void *unused)
 	if (!introspection_xml)
 		return NULL;
 	vrrp_instance_introspection_data = g_dbus_node_info_new_for_xml(introspection_xml, &error);
-	free(introspection_xml);
+	FREE_CONST(introspection_xml);
 	if (error != NULL) {
 		log_message(LOG_INFO, "Parsing DBus interface %s from file %s failed: %s",
 			    DBUS_VRRP_INSTANCE_INTERFACE, DBUS_VRRP_INSTANCE_INTERFACE_FILE_PATH, error->message);
@@ -706,7 +739,7 @@ dbus_send_reload_signal(void)
 }
 
 static gboolean
-dbus_unregister_object(char *str)
+dbus_unregister_object(const char *str)
 {
 	gboolean ret = false;
 
@@ -724,13 +757,13 @@ dbus_unregister_object(char *str)
 }
 
 void
-dbus_remove_object(vrrp_t *vrrp)
+dbus_remove_object(const vrrp_t *vrrp)
 {
 	dbus_unregister_object(vrrp->iname);
 }
 
 static int
-handle_dbus_msg(__attribute__((unused)) thread_t *thread)
+handle_dbus_msg(__attribute__((unused)) thread_ref_t thread)
 {
 	dbus_queue_ent_t *ent;
 	char recv_buf;
@@ -792,11 +825,11 @@ handle_dbus_msg(__attribute__((unused)) thread_t *thread)
 				ent->reply = DBUS_SUCCESS;
 			}
 		}
-		if (write(dbus_out_pipe[1], ent, 1) != 1)
+		if (write(dbus_out_pipe[1], &recv_buf, 1) != 1)
 			log_message(LOG_INFO, "Write from main thread to DBus thread failed");
 	}
 
-	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER);
+	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER, false);
 
 	return 0;
 }
@@ -804,61 +837,67 @@ handle_dbus_msg(__attribute__((unused)) thread_t *thread)
 void
 dbus_reload(list o, list n)
 {
-	element e1, e2, e3;
-	vrrp_t *vrrp_n, *vrrp_o, *vrrp_n3;
+	element e1, e2;
+	vrrp_t *vrrp_n, *vrrp_o;
 
-	if (!LIST_ISEMPTY(n)) {
-		for (e1 = LIST_HEAD(n); e1; ELEMENT_NEXT(e1)) {
-			char *n_name;
-			bool match_found;
+	if (!dbus_running)
+		return;
 
-			vrrp_n = ELEMENT_DATA(e1);
+	LIST_FOREACH(n, vrrp_n, e1) {
+		char *n_name;
+		bool match_found;
 
-			if (LIST_ISEMPTY(o)) {
-				dbus_create_object(vrrp_n);
-				continue;
-			}
+		n_name = IF_BASE_IFP(vrrp_n->ifp)->ifname;
 
-			n_name = IF_BASE_IFP(vrrp_n->ifp)->ifname;
+		/* Try and find an instance with same vrid/family/interface that existed before and now */
+		match_found = false;
+		LIST_FOREACH(o, vrrp_o, e2) {
+			if (vrrp_n->vrid == vrrp_o->vrid &&
+			    vrrp_n->family == vrrp_o->family &&
+			    !strcmp(n_name, IF_BASE_IFP(vrrp_o->ifp)->ifname)) {
+				/* If the old instance exists in the new config,
+				 * then the dbus object will exist */
+				if (!strcmp(vrrp_n->iname, vrrp_o->iname)) {
+					match_found = true;
+					g_hash_table_replace(objects, no_const_char_p(vrrp_n->iname), g_hash_table_lookup(objects, vrrp_o->iname));
+					break;
+				} else {
+					gpointer instance;
+					if ((instance = g_hash_table_lookup(objects, vrrp_o->iname))) {
+						g_hash_table_remove(objects, vrrp_o->iname);
+						g_hash_table_insert(objects, no_const_char_p(vrrp_n->iname), instance);
+					}
+					match_found = true;
+					break;
+				}
 
-			/* Try an find an instance with same vrid/family/interface that existed before and now */
-			for (e2 = LIST_HEAD(o), match_found = false; e2 && !match_found; ELEMENT_NEXT(e2)) {
-				vrrp_o = ELEMENT_DATA(e2);
+#if 0
+				/* The following was in the original code, but I can't work out
+				 * its purpose. Leaving it here for now in case it is really needed. */
 
-				if (vrrp_n->vrid == vrrp_o->vrid &&
-				    vrrp_n->family == vrrp_o->family &&
-				    !strcmp(n_name, IF_BASE_IFP(vrrp_o->ifp)->ifname)) {
-					/* If the old instance exists in the new config,
-					 * then the dbus object will exist */
-					if (!strcmp(vrrp_n->iname, vrrp_o->iname)) {
+				/* Check if the old instance name we found still exists
+				 * (but has a different vrid/family/interface) */
+				LIST_FOREACH(n, vrrp_n3, e3) {
+					if (!strcmp(vrrp_o->iname, vrrp_n3->iname)) {
 						match_found = true;
 						break;
 					}
-
-					/* Check if the old instance name we found still exists
-					 * (but has a different vrid/family/interface) */
-					for (e3 = LIST_HEAD(n); e3; ELEMENT_NEXT(e3)) {
-						vrrp_n3 = ELEMENT_DATA(e3);
-						if (!strcmp(vrrp_o->iname, vrrp_n3->iname)) {
-							match_found = true;
-							break;
-						}
-					}
 				}
+#endif
 			}
-
-			if (match_found)
-				continue;
-
-			dbus_create_object(vrrp_n);
 		}
+
+		if (match_found)
+			continue;
+
+		dbus_create_object(vrrp_n);
 	}
 
 	/* Signal we have reloaded */
 	dbus_send_reload_signal();
 
 	/* We need to reinstate the read thread */
-	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER);
+	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER, false);
 }
 
 bool
@@ -866,46 +905,42 @@ dbus_start(void)
 {
 	pthread_t dbus_thread;
 	sigset_t sigset, cursigset;
+	int flags;
 
-#ifdef HAVE_PIPE2
-	if (pipe2(dbus_in_pipe, O_CLOEXEC)) {
+	if (dbus_running)
+		return false;
+
+	if (open_pipe(dbus_in_pipe)) {
 		log_message(LOG_INFO, "Unable to create inbound dbus pipe - disabling DBus");
 		return false;
 	}
-	if (pipe2(dbus_out_pipe, O_CLOEXEC)) {
+	if (open_pipe(dbus_out_pipe)) {
 		log_message(LOG_INFO, "Unable to create outbound dbus pipe - disabling DBus");
 		close(dbus_in_pipe[0]);
 		close(dbus_in_pipe[1]);
+		dbus_in_pipe[0] = -1;
+		dbus_out_pipe[0] = -1;
 		return false;
 	}
-#else
-	if (pipe(dbus_in_pipe)) {
-		log_message(LOG_INFO, "Unable to create inbound dbus pipe - disabling DBus");
-		return false;
-	}
-	if (pipe(dbus_out_pipe)) {
-		log_message(LOG_INFO, "Unable to create outbound dbus pipe - disabling DBus");
-		close(dbus_in_pipe[0]);
-		close(dbus_in_pipe[1]);
-		return false;
-	}
-	fcntl (dbus_in_pipe[0], F_SETFD, FD_CLOEXEC | fcntl(dbus_in_pipe[0], F_GETFD));
-	fcntl (dbus_in_pipe[1], F_SETFD, FD_CLOEXEC | fcntl(dbus_in_pipe[1], F_GETFD));
-	fcntl (dbus_out_pipe[0], F_SETFD, FD_CLOEXEC | fcntl(dbus_out_pipe[0], F_GETFD));
-	fcntl (dbus_out_pipe[1], F_SETFD, FD_CLOEXEC | fcntl(dbus_out_pipe[1], F_GETFD));
-#endif
 
-	/* We don't want the main thread to block when using the pipes */
-	fcntl(dbus_in_pipe[0], F_SETFL, O_NONBLOCK | fcntl(dbus_in_pipe[0], F_GETFL));
-	fcntl(dbus_out_pipe[1], F_SETFL, O_NONBLOCK | fcntl(dbus_out_pipe[1], F_GETFL));
+	/* We don't want the main thread to block when using the pipes,
+	 * but the other side of the pipes should block. */
+	flags = fcntl(dbus_in_pipe[1], F_GETFL);
+	if (flags == -1 ||
+	    fcntl(dbus_in_pipe[1], F_SETFL, flags & ~O_NONBLOCK) == -1)
+		log_message(LOG_INFO, "Unable to set dbus thread in_pipe blocking - (%d - %m)", errno);
+	flags = fcntl(dbus_out_pipe[0], F_GETFL);
+	if (flags == -1 ||
+	    fcntl(dbus_out_pipe[0], F_SETFL, flags & ~O_NONBLOCK) == -1)
+		log_message(LOG_INFO, "Unable to set dbus thread out_pipe blocking - (%d - %m)", errno);
 
-	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER);
+	thread_add_read(master, handle_dbus_msg, NULL, dbus_in_pipe[0], TIMER_NEVER, false);
 
 	/* Initialise the thread termination semaphore */
 	sem_init(&thread_end, 0, 0);
 
 	/* Block signals (all) we don't want the new thread to process */
-	sigemptyset(&sigset);
+	sigfillset(&sigset);
 	pthread_sigmask(SIG_SETMASK, &sigset, &cursigset);
 
 	/* Now create the dbus thread */
@@ -913,6 +948,8 @@ dbus_start(void)
 
 	/* Reenable our signals */
 	pthread_sigmask(SIG_SETMASK, &cursigset, NULL);
+
+	dbus_running = true;
 
 	return true;
 }
@@ -923,6 +960,12 @@ dbus_stop(void)
 	struct timespec thread_end_wait;
 	int ret;
 	gchar *path;
+
+	if (!dbus_running)
+		return;
+
+	g_hash_table_foreach_remove(objects, remove_object, NULL);
+	objects = NULL;
 
 	if (global_connection != NULL) {
 		path = dbus_object_create_path_vrrp();
@@ -937,7 +980,7 @@ dbus_stop(void)
 
 	clock_gettime(CLOCK_REALTIME, &thread_end_wait);
 	thread_end_wait.tv_sec += 1;
-	while ((ret = sem_timedwait(&thread_end, &thread_end_wait)) == -1 && errno == EINTR) ;
+	while ((ret = sem_timedwait(&thread_end, &thread_end_wait)) == -1 && check_EINTR(errno));
 
 	if (ret == -1 ) {
 		if (errno == ETIMEDOUT)
@@ -949,4 +992,23 @@ dbus_stop(void)
 		log_message(LOG_INFO, "Released DBus");
 		sem_destroy(&thread_end);
 	}
+
+	dbus_running = false;
+
+	close(dbus_in_pipe[0]);
+	close(dbus_in_pipe[1]);
+	dbus_in_pipe[0] = -1;
+	dbus_in_pipe[0] = -1;
+	close(dbus_out_pipe[0]);
+	close(dbus_out_pipe[1]);
+	dbus_out_pipe[0] = -1;
+	dbus_out_pipe[0] = -1;
 }
+
+#ifdef THREAD_DUMP
+void
+register_vrrp_dbus_addresses(void)
+{
+	register_thread_address("handle_dbus_msg", handle_dbus_msg);
+}
+#endif

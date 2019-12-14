@@ -23,18 +23,13 @@
 #include "config.h"
 
 /* system includes */
-#include <string.h>
 
 /* keepalived includes */
 #include "memory.h"
-#include "utils.h"
-#include "list.h"
 
 /* genhash includes */
 #include "include/sock.h"
 #include "include/layer4.h"
-#include "include/ssl.h"
-#include "include/main.h"
 
 /* global var */
 SOCK *sock = NULL;
@@ -54,7 +49,9 @@ close_sock(SOCK * sock_obj)
 void
 free_sock(SOCK * sock_obj)
 {
-	DBG("Freeing fd:%d\n", sock_obj->fd);
+#ifdef _GENHASH_DEBUG_
+	fprintf(stderr, "Freeing fd:%d\n", sock_obj->fd);
+#endif
 
 	close_sock(sock_obj);
 	FREE(sock_obj);

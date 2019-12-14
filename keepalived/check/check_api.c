@@ -22,14 +22,14 @@
 
 #include "config.h"
 
-#include <dirent.h>
 #include <dlfcn.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <arpa/inet.h>
 
 #include "check_api.h"
 #include "main.h"
 #include "parser.h"
-#include "memory.h"
 #include "utils.h"
 #include "logger.h"
 #include "bitops.h"
@@ -41,80 +41,100 @@
 #include "check_http.h"
 #include "check_ssl.h"
 #include "check_dns.h"
+#include "ipwrapper.h"
+#include "check_daemon.h"
+#ifdef _WITH_BFD_
+#include "check_bfd.h"
+#include "bfd_event.h"
+#include "bfd_daemon.h"
+#endif
 
 /* Global vars */
 list checkers_queue;
+#ifdef _CHECKER_DEBUG_
+bool do_checker_debug;
+#endif
 
 /* free checker data */
 static void
 free_checker(void *data)
 {
-	checker_t *checker= data;
+	checker_t *checker = data;
 	(*checker->free_func) (checker);
 }
 
 /* dump checker data */
 static void
-dump_checker(void *data)
+dump_checker(FILE *fp, const void *data)
 {
-	checker_t *checker = data;
-	log_message(LOG_INFO, " %s", FMT_CHK(checker));
-	(*checker->dump_func) (checker);
+	const checker_t *checker = data;
+
+	conf_write(fp, " %s -> %s", FMT_VS(checker->vs), FMT_CHK(checker));
+
+	(*checker->dump_func) (fp, checker);
 }
 
 void
-dump_connection_opts(void *data)
+dump_connection_opts(FILE *fp, const void *data)
 {
-	conn_opts_t *conn = data;
+	const conn_opts_t *conn = data;
 
-	log_message(LOG_INFO, "     Dest = %s", inet_sockaddrtopair(&conn->dst));
+	conf_write(fp, "     Dest = %s", inet_sockaddrtopair(&conn->dst));
 	if (conn->bindto.ss_family)
-		log_message(LOG_INFO, "     Bind to = %s", inet_sockaddrtopair(&conn->bindto));
+		conf_write(fp, "     Bind to = %s", inet_sockaddrtopair(&conn->bindto));
 	if (conn->bind_if[0])
-		log_message(LOG_INFO, "     Bind i/f = %s", conn->bind_if);
+		conf_write(fp, "     Bind i/f = %s", conn->bind_if);
 #ifdef _WITH_SO_MARK_
 	if (conn->fwmark != 0)
-		log_message(LOG_INFO, "     Mark = %u", conn->fwmark);
+		conf_write(fp, "     Mark = %u", conn->fwmark);
 #endif
-	log_message(LOG_INFO, "     Timeout = %d", conn->connection_to/TIMER_HZ);
+	conf_write(fp, "     Timeout = %f", (double)conn->connection_to / TIMER_HZ);
 }
 
 void
-dump_checker_opts(void *data)
+dump_checker_opts(FILE *fp, const void *data)
 {
-	checker_t *checker = data;
-	conn_opts_t *conn = checker->co;
+	const checker_t *checker = data;
+	const conn_opts_t *conn = checker->co;
 
 	if (conn) {
-		log_message(LOG_INFO, "   Connection");
-		dump_connection_opts(conn);
+		conf_write(fp, "   Connection");
+		dump_connection_opts(fp, conn);
 	}
 
-	log_message(LOG_INFO, "   Alpha is %s", checker->alpha ? "ON" : "OFF");
-	log_message(LOG_INFO, "   Delay loop = %lu" , checker->delay_loop / TIMER_HZ);
+	conf_write(fp, "   Alpha is %s", checker->alpha ? "ON" : "OFF");
+	conf_write(fp, "   Log all failures %s", checker->log_all_failures ? "ON" : "OFF");
+	conf_write(fp, "   Delay loop = %f" , (double)checker->delay_loop / TIMER_HZ);
 	if (checker->retry) {
-		log_message(LOG_INFO, "   Retry count = %u" , checker->retry);
-		log_message(LOG_INFO, "   Retry delay = %lu" , checker->delay_before_retry / TIMER_HZ);
+		conf_write(fp, "   Retry count = %u" , checker->retry);
+		conf_write(fp, "   Retry delay = %f" , (double)checker->delay_before_retry / TIMER_HZ);
 	}
-	log_message(LOG_INFO, "   Warmup = %lu", checker->warmup / TIMER_HZ);
+	conf_write(fp, "   Warmup = %f", (double)checker->warmup / TIMER_HZ);
+
+	conf_write(fp, "   Enabled = %d", checker->enabled);
+	conf_write(fp, "   Is up = %d", checker->is_up);
+	conf_write(fp, "   Has run = %d", checker->has_run);
+	conf_write(fp, "   Retries left before fail = %u", checker->retry_it);
+	conf_write(fp, "   Delay before retry = %f", (double)checker->default_delay_before_retry / TIMER_HZ);
 }
 
 /* Queue a checker into the checkers_queue */
 checker_t *
-queue_checker(void (*free_func) (void *), void (*dump_func) (void *)
-	      , int (*launch) (thread_t *)
-	      , bool (*compare) (void *, void *)
+queue_checker(void (*free_func) (checker_t *), void (*dump_func) (FILE *, const checker_t *)
+	      , thread_func_t launch
+	      , bool (*compare) (const checker_t *, const checker_t *)
 	      , void *data
-	      , conn_opts_t *co)
+	      , conn_opts_t *co
+	      , bool fd_required)
 {
 	virtual_server_t *vs = LIST_TAIL_DATA(check_data->vs);
 	real_server_t *rs = LIST_TAIL_DATA(vs->rs);
 	checker_t *checker = (checker_t *) MALLOC(sizeof (checker_t));
 
-	/* Set default dst = RS, timeout = 5 */
+	/* Set default dst = RS, timeout = default */
 	if (co) {
 		co->dst = rs->addr;
-		co->connection_to = 5 * TIMER_HZ;
+		co->connection_to = UINT_MAX;
 	}
 
 	checker->free_func = free_func;
@@ -125,8 +145,7 @@ queue_checker(void (*free_func) (void *), void (*dump_func) (void *)
 	checker->rs = rs;
 	checker->data = data;
 	checker->co = co;
-	/* Enable the checker if the virtual server is not configured with ha_suspend */
-	checker->enabled = !vs->ha_suspend;
+	checker->enabled = true;
 	checker->alpha = -1;
 	checker->delay_loop = ULONG_MAX;
 	checker->warmup = ULONG_MAX;
@@ -139,6 +158,9 @@ queue_checker(void (*free_func) (void *), void (*dump_func) (void *)
 
 	/* queue the checker */
 	list_add(checkers_queue, checker);
+
+	if (fd_required)
+		check_data->num_checker_fd_required++;
 
 	return checker;
 }
@@ -160,15 +182,15 @@ check_conn_opts(conn_opts_t *co)
 	if (co->dst.ss_family == AF_INET6 &&
 	    IN6_IS_ADDR_LINKLOCAL(&((struct sockaddr_in6*)&co->dst)->sin6_addr) &&
 	    !co->bind_if[0]) {
-		log_message(LOG_INFO, "Checker link local address %s requires a bind_if", inet_sockaddrtos(&co->dst));
+		report_config_error(CONFIG_GENERAL_ERROR, "Checker link local address %s requires a bind_if", inet_sockaddrtos(&co->dst));
 		return false;
 	}
 
 	return true;
 }
 
-bool
-compare_conn_opts(conn_opts_t *a, conn_opts_t *b)
+bool __attribute__ ((pure))
+compare_conn_opts(const conn_opts_t *a, const conn_opts_t *b)
 {
 	if (a == b)
 		return true;
@@ -207,58 +229,72 @@ checker_set_dst_port(struct sockaddr_storage *dst, uint16_t port)
 
 /* "connect_ip" keyword */
 static void
-co_ip_handler(vector_t *strvec)
+co_ip_handler(const vector_t *strvec)
 {
 	conn_opts_t *co = CHECKER_GET_CO();
 
-	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, &co->dst))
-		log_message(LOG_INFO, "Invalid connect_ip address %s - ignoring", FMT_STR_VSLOT(strvec, 1));
+	if (inet_stosockaddr(strvec_slot(strvec, 1), NULL, &co->dst))
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid connect_ip address %s - ignoring", strvec_slot(strvec, 1));
 	else if (co->bindto.ss_family != AF_UNSPEC &&
 		 co->bindto.ss_family != co->dst.ss_family) {
-		log_message(LOG_INFO, "connect_ip address %s does not match address family of bindto - skipping", FMT_STR_VSLOT(strvec, 1));
+		report_config_error(CONFIG_GENERAL_ERROR, "connect_ip address %s does not match address family of bindto - skipping", strvec_slot(strvec, 1));
 		co->dst.ss_family = AF_UNSPEC;
 	}
 }
 
 /* "connect_port" keyword */
 static void
-co_port_handler(vector_t *strvec)
+co_port_handler(const vector_t *strvec)
 {
 	conn_opts_t *co = CHECKER_GET_CO();
-	checker_set_dst_port(&co->dst, htons(CHECKER_VALUE_INT(strvec)));
+	unsigned port;
+
+	if (!read_unsigned_strvec(strvec, 1, &port, 1, 65535, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid checker connect_port '%s'", strvec_slot(strvec, 1));
+		return;
+	}
+
+	checker_set_dst_port(&co->dst, htons(port));
 }
 
 /* "bindto" keyword */
 static void
-co_srcip_handler(vector_t *strvec)
+co_srcip_handler(const vector_t *strvec)
 {
 	conn_opts_t *co = CHECKER_GET_CO();
-	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, &co->bindto))
-		log_message(LOG_INFO, "Invalid bindto address %s - ignoring", FMT_STR_VSLOT(strvec, 1));
+	if (inet_stosockaddr(strvec_slot(strvec, 1), NULL, &co->bindto))
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid bindto address %s - ignoring", strvec_slot(strvec, 1));
 	else if (co->dst.ss_family != AF_UNSPEC &&
 		 co->dst.ss_family != co->bindto.ss_family) {
-		log_message(LOG_INFO, "bindto address %s does not match address family of connect_ip - skipping", FMT_STR_VSLOT(strvec, 1));
+		report_config_error(CONFIG_GENERAL_ERROR, "bindto address %s does not match address family of connect_ip - skipping", strvec_slot(strvec, 1));
 		co->bindto.ss_family = AF_UNSPEC;
 	}
 }
 
 /* "bind_port" keyword */
 static void
-co_srcport_handler(vector_t *strvec)
+co_srcport_handler(const vector_t *strvec)
 {
 	conn_opts_t *co = CHECKER_GET_CO();
-	checker_set_dst_port(&co->bindto, htons(CHECKER_VALUE_INT(strvec)));
+	unsigned port;
+
+	if (!read_unsigned_strvec(strvec, 1, &port, 1, 65535, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid checker bind_port '%s'", strvec_slot(strvec, 1));
+		return;
+	}
+
+	checker_set_dst_port(&co->bindto, htons(port));
 }
 
 /* "bind_if" keyword */
 static void
-co_srcif_handler(vector_t *strvec)
+co_srcif_handler(const vector_t *strvec)
 {
 	// This is needed for link local IPv6 bindto address
 	conn_opts_t *co = CHECKER_GET_CO();
 
 	if (strlen(strvec_slot(strvec, 1)) > sizeof(co->bind_if) - 1) {
-		log_message(LOG_INFO, "Interface name %s is too long - ignoring", FMT_STR_VSLOT(strvec, 1));
+		report_config_error(CONFIG_GENERAL_ERROR, "Interface name %s is too long - ignoring", strvec_slot(strvec, 1));
 		return;
 	}
 	strcpy(co->bind_if, strvec_slot(strvec, 1));
@@ -266,57 +302,93 @@ co_srcif_handler(vector_t *strvec)
 
 /* "connect_timeout" keyword */
 static void
-co_timeout_handler(vector_t *strvec)
+co_timeout_handler(const vector_t *strvec)
 {
 	conn_opts_t *co = CHECKER_GET_CO();
-	co->connection_to = CHECKER_VALUE_UINT(strvec) * TIMER_HZ;
+	unsigned long timer;
 
-	/* do not allow 0 timeout */
-	if (! co->connection_to)
-		co->connection_to = TIMER_HZ;
+	if (!read_timer(strvec, 1, &timer, 1, UINT_MAX, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "connect_timeout %s invalid - ignoring", strvec_slot(strvec, 1));
+		return;
+	}
+	co->connection_to = timer;
 }
 
 #ifdef _WITH_SO_MARK_
 /* "fwmark" keyword */
 static void
-co_fwmark_handler(vector_t *strvec)
+co_fwmark_handler(const vector_t *strvec)
 {
 	conn_opts_t *co = CHECKER_GET_CO();
-	co->fwmark = CHECKER_VALUE_UINT(strvec);
+	unsigned fwmark;
+
+	if (!read_unsigned_strvec(strvec, 1, &fwmark, 0, UINT_MAX, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid fwmark connection value '%s'", strvec_slot(strvec, 1));
+		return;
+	}
+	co->fwmark = fwmark;
 }
 #endif
 
 static void
-retry_handler(vector_t *strvec)
+retry_handler(const vector_t *strvec)
 {
 	checker_t *checker = CHECKER_GET_CURRENT();
-	checker->retry = CHECKER_VALUE_UINT(strvec);
+	unsigned retry;
+
+	if (!read_unsigned_strvec(strvec, 1, &retry, 0, UINT_MAX, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid retry connection value '%s'", strvec_slot(strvec, 1));
+		return;
+	}
+
+	checker->retry = retry;
 }
 
 static void
-delay_before_retry_handler(vector_t *strvec)
+delay_before_retry_handler(const vector_t *strvec)
 {
 	checker_t *checker = CHECKER_GET_CURRENT();
-	checker->delay_before_retry = CHECKER_VALUE_UINT(strvec) * TIMER_HZ;
+	unsigned long delay;
+
+	if (!read_timer(strvec, 1, &delay, 0, 0, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid delay_before_retry connection value '%s'", strvec_slot(strvec, 1));
+		return;
+	}
+
+	checker->delay_before_retry = delay;
 }
 
 /* "warmup" keyword */
 static void
-warmup_handler(vector_t *strvec)
+warmup_handler(const vector_t *strvec)
 {
 	checker_t *checker = CHECKER_GET_CURRENT();
-	checker->warmup = CHECKER_VALUE_UINT(strvec) * TIMER_HZ;
+	unsigned long warmup;
+
+	if (!read_timer(strvec, 1, &warmup, 0, 0, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid warmup connection value '%s'", strvec_slot(strvec, 1));
+		return;
+	}
+
+	checker->warmup = warmup;
 }
 
 static void
-delay_handler(vector_t *strvec)
+delay_handler(const vector_t *strvec)
 {
 	checker_t *checker = CHECKER_GET_CURRENT();
-	checker->delay_loop = read_timer(strvec);
+	unsigned long delay_loop;
+
+	if (!read_timer(strvec, 1, &delay_loop, 1, 0, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "delay_loop '%s' is invalid - ignoring", strvec_slot(strvec, 1));
+		return;
+	}
+
+	checker->delay_loop = delay_loop;
 }
 
 static void
-alpha_handler(vector_t *strvec)
+alpha_handler(const vector_t *strvec)
 {
 	checker_t *checker = CHECKER_GET_CURRENT();
 	int res = true;
@@ -324,11 +396,26 @@ alpha_handler(vector_t *strvec)
 	if (vector_size(strvec) >= 2) {
 		res = check_true_false(strvec_slot(strvec, 1));
 		if (res == -1) {
-			log_message(LOG_INFO, "Invalid alpha parameter %s", FMT_STR_VSLOT(strvec, 1));
+			report_config_error(CONFIG_GENERAL_ERROR, "Invalid alpha parameter %s", strvec_slot(strvec, 1));
 			return;
 		}
 	}
 	checker->alpha = res;
+}
+static void
+log_all_failures_handler(const vector_t *strvec)
+{
+	checker_t *checker = CHECKER_GET_CURRENT();
+	int res = true;
+
+	if (vector_size(strvec) >= 2) {
+		res = check_true_false(strvec_slot(strvec, 1));
+		if (res == -1) {
+			report_config_error(CONFIG_GENERAL_ERROR, "Invalid log_all_failures parameter %s", strvec_slot(strvec, 1));
+			return;
+		}
+	}
+	checker->log_all_failures = res;
 }
 void
 install_checker_common_keywords(bool connection_keywords)
@@ -349,15 +436,16 @@ install_checker_common_keywords(bool connection_keywords)
 	install_keyword("warmup", &warmup_handler);
 	install_keyword("delay_loop", &delay_handler);
 	install_keyword("alpha", &alpha_handler);
+	install_keyword("log_all_failures", &log_all_failures_handler);
 }
 
 /* dump the checkers_queue */
 void
-dump_checkers_queue(void)
+dump_checkers_queue(FILE *fp)
 {
 	if (!LIST_ISEMPTY(checkers_queue)) {
-		log_message(LOG_INFO, "------< Health checkers >------");
-		dump_list(checkers_queue);
+		conf_write(fp, "------< Health checkers >------");
+		dump_list(fp, checkers_queue);
 	}
 }
 
@@ -408,37 +496,50 @@ register_checkers_thread(void)
 	element e;
 	unsigned long warmup;
 
-	for (e = LIST_HEAD(checkers_queue); e; ELEMENT_NEXT(e)) {
-		checker = ELEMENT_DATA(e);
-		log_message(LOG_INFO, "%sctivating healthchecker for service %s for VS %s"
-				    , checker->enabled ? "A" : "Dea", FMT_RS(checker->rs, checker->vs), FMT_VS(checker->vs));
+	LIST_FOREACH(checkers_queue, checker, e) {
 		if (checker->launch)
 		{
+			if (checker->vs->ha_suspend && !checker->vs->ha_suspend_addr_count)
+				checker->enabled = false;
+
+			log_message(LOG_INFO, "%sctivating healthchecker for service %s for VS %s"
+					    , checker->enabled ? "A" : "Dea", FMT_RS(checker->rs, checker->vs), FMT_VS(checker->vs));
+
 			/* wait for a random timeout to begin checker thread.
 			   It helps avoiding multiple simultaneous checks to
 			   the same RS.
 			*/
 			warmup = checker->warmup;
-			if (warmup)
-				warmup = warmup * (unsigned)rand() / RAND_MAX;
+			if (warmup) {
+				/* coverity[dont_call] */
+				warmup = warmup * (unsigned)random() / RAND_MAX;
+			}
 			thread_add_timer(master, checker->launch, checker,
 					 BOOTSTRAP_DELAY + warmup);
 		}
 	}
+
+#ifdef _WITH_BFD_
+	log_message(LOG_INFO, "Activating BFD healthchecker");
+
+	/* We need to always enable this, since the bfd process may write to the pipe, and we
+	 * need to ensure that messages are stripped out. */
+	start_bfd_monitoring(master);
+#endif
 }
 
 /* Sync checkers activity with netlink kernel reflection */
-static bool
+static bool __attribute__ ((pure))
 addr_matches(const virtual_server_t *vs, void *address)
 {
-	void *addr;
-        virtual_server_group_entry_t *vsg_entry;
+	const void *addr;
+	virtual_server_group_entry_t *vsg_entry;
 
 	if (vs->addr.ss_family != AF_UNSPEC) {
 		if (vs->addr.ss_family == AF_INET6)
-			addr = (void *) &((struct sockaddr_in6 *)&vs->addr)->sin6_addr;
+			addr = (const void *) &((const struct sockaddr_in6 *)&vs->addr)->sin6_addr;
 		else
-			addr = (void *) &((struct sockaddr_in *)&vs->addr)->sin_addr;
+			addr = (const void *) &((const struct sockaddr_in *)&vs->addr)->sin_addr;
 
 		return inaddr_equal(vs->addr.ss_family, addr, address);
 	}
@@ -516,53 +617,59 @@ void
 update_checker_activity(sa_family_t family, void *address, bool enable)
 {
 	checker_t *checker;
-	element e;
+	virtual_server_t *vs;
+	element e, e1;
 	char addr_str[INET6_ADDRSTRLEN];
 	bool address_logged = false;
 
-	/* Display netlink operation */
 	if (__test_bit(LOG_ADDRESS_CHANGES, &debug)) {
 		inet_ntop(family, address, addr_str, sizeof(addr_str));
 		log_message(LOG_INFO, "Netlink reflector reports IP %s %s"
 				    , addr_str, (enable) ? "added" : "removed");
-
 		address_logged = true;
 	}
 
 	if (!using_ha_suspend)
 		return;
 
-	/* Processing Healthcheckers queue */
-	if (!LIST_ISEMPTY(checkers_queue)) {
-		for (e = LIST_HEAD(checkers_queue); e; ELEMENT_NEXT(e)) {
-			checker = ELEMENT_DATA(e);
+	if (LIST_ISEMPTY(checkers_queue))
+		return;
 
-			if (!CHECKER_HA_SUSPEND(checker))
+	/* Check if any of the virtual servers are using this address, and have ha_suspend */
+	LIST_FOREACH(check_data->vs, vs, e) {
+		if (!vs->ha_suspend)
+			continue;
+
+		/* If there is no address configured, the family will be AF_UNSPEC */
+		if (vs->af != family)
+			continue;
+
+		if (!addr_matches(vs, address))
+			continue;
+
+		if (!address_logged &&
+		    __test_bit(LOG_DETAIL_BIT, &debug)) {
+			inet_ntop(family, address, addr_str, sizeof(addr_str));
+			log_message(LOG_INFO, "Netlink reflector reports IP %s %s"
+					    , addr_str, (enable) ? "added" : "removed");
+		}
+		address_logged = true;
+
+		/* If we have that same address (IPv6 link local) on multiple interfaces,
+		 * we want to count them multiple times so that we only suspend the checkers
+		 * if they are all deleted */
+		if (enable)
+			vs->ha_suspend_addr_count++;
+		else
+			vs->ha_suspend_addr_count--;
+
+		/* Processing Healthcheckers queue for this vs */
+		LIST_FOREACH(checkers_queue, checker, e1) {
+			if (checker->vs != vs)
 				continue;
 
-			/* If there is no address configured, the family will be AF_UNSPEC */
-			if (checker->vs->af != family)
-				continue;
-
-			/* If we have that same address (IPv6 link local) on multiple interfaces,
-			 * we want to count them multiple times so that we only suspend the checkers
-			 * if they are all deleted */
-			if (addr_matches(checker->vs, address)) {
-				if (!address_logged &&
-				    __test_bit(LOG_DETAIL_BIT, &debug)) {
-					inet_ntop(family, address, addr_str, sizeof(addr_str));
-					log_message(LOG_INFO, "Netlink reflector reports IP %s %s"
-							    , addr_str, (enable) ? "added" : "removed");
-				}
-				address_logged = true;
-
-				if (enable)
-					checker->vs->ha_suspend_addr_count++;
-				else
-					checker->vs->ha_suspend_addr_count--;
-			}
-
-			if ((!(checker->vs->ha_suspend_addr_count)) == checker->enabled) {
+			if (enable != checker->enabled &&
+			    (enable || vs->ha_suspend_addr_count == 0)) {
 				log_message(LOG_INFO, "%sing healthchecker for service %s for VS %s",
 							!checker->enabled ? "Activat" : "Suspend",
 							FMT_RS(checker->rs, checker->vs), FMT_VS(checker->vs));
@@ -582,4 +689,7 @@ install_checkers_keyword(void)
 	install_http_check_keyword();
 	install_ssl_check_keyword();
 	install_dns_check_keyword();
+#ifdef _WITH_BFD_
+	install_bfd_check_keyword();
+#endif
 }

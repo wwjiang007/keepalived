@@ -22,12 +22,72 @@ IMPORTS
         FROM SNMPv2-TC;
 
 keepalived MODULE-IDENTITY
-     LAST-UPDATED "201709150000Z"
+     LAST-UPDATED "201907120003Z"
      ORGANIZATION "Keepalived"
      CONTACT-INFO "http://www.keepalived.org"
      DESCRIPTION
         "This MIB describes objects used by keepalived, both
          for VRRP and health checker."
+     REVISION "201907120003Z"
+     DESCRIPTION "add IPVS GRE tunnels"
+     REVISION "201907120002Z"
+     DESCRIPTION "add IPVS tunnel checksum option"
+     REVISION "201907120001Z"
+     DESCRIPTION "add IPVS tunnel type"
+     REVISION "201906300003Z"
+     DESCRIPTION "add vrrp process tracker"
+     REVISION "201906300002Z"
+     DESCRIPTION "add vrrp bfd tracker"
+     REVISION "201906300001Z"
+     DESCRIPTION "add reverse for vrrp trackers"
+     REVISION "201904010001Z"
+     DESCRIPTION "add lvs_flush_onstop for each virtual server"
+     REVISION "201903250001Z"
+     DESCRIPTION "add lvs_flush_onstop"
+     REVISION "201902140001Z"
+     DESCRIPTION "add checker connection timeout"
+     REVISION "201902140000Z"
+     DESCRIPTION "add checker warmup, delay loop and delay before retry in micro-seconds"
+     REVISION "201808140000Z"
+     DESCRIPTION "add MH LVS scheduler"
+     REVISION "201807180000Z"
+     DESCRIPTION "add script master rx lower priority"
+     REVISION "201806040000Z"
+     DESCRIPTION "add ip rule protocol, ip_proto, src and dst port ranges"
+     REVISION "201805170000Z"
+     DESCRIPTION "add virtual server shutdown status"
+     REVISION "201804290000Z"
+     DESCRIPTION "add VRRP state stop"
+     REVISION "201804280000Z"
+     DESCRIPTION "add VRRP address peers"
+     REVISION "201803060000Z"
+     DESCRIPTION "add VRRP protocol version to VRRP instance"
+     REVISION "201803010000Z"
+     DESCRIPTION "add route option fastopen_no_cookie and rule option l3mdev"
+     REVISION "201801100000Z"
+     DESCRIPTION "add sync group notify_stop script"
+     REVISION "201801080001Z"
+     DESCRIPTION "add SmtpAlert global defaults"
+     REVISION "201801080000Z"
+     DESCRIPTION "add SmtpAlert for real and virtual servers"
+     REVISION "201710260000Z"
+     DESCRIPTION "remove vrrpScriptResult disabled status"
+     REVISION "201710030001Z"
+     DESCRIPTION
+	"correct max weight for track scripts
+	 and track interfaces"
+     REVISION "201710030000Z"
+     DESCRIPTION "correct max weight for vrrpTrackFile"
+     REVISION "201710020003Z"
+     DESCRIPTION "add dynamic_interfaces"
+     REVISION "201710020002Z"
+     DESCRIPTION "add sync_group_tracking_weight"
+     REVISION "201710020001Z"
+     DESCRIPTION "allow tracking file weights of 0 and 254"
+     REVISION "201710020000Z"
+     DESCRIPTION
+	"add weights for tracking files and
+	 tracking scripts, interfaces and files for sync groups"
      REVISION "201709150000Z"
      DESCRIPTION "add sctp and none as virtual server protocol types"
      REVISION "201708100000Z"
@@ -36,6 +96,10 @@ keepalived MODULE-IDENTITY
      DESCRIPTION "add default weight setting on a virtual server"
      REVISION "201707220000Z"
      DESCRIPTION "improve flexibility of checker configuration"
+     REVISION "201706020000Z"
+     DESCRIPTION "add smtpEmailFaults"
+     REVISION "201705300000Z"
+     DESCRIPTION "add vrrp track files"
      REVISION "201704110001Z"
      DESCRIPTION "add real server forwarding method"
      REVISION "201704110000Z"
@@ -44,6 +108,8 @@ keepalived MODULE-IDENTITY
      DESCRIPTION "add ip rule/route uid support"
      REVISION "201611260000Z"
      DESCRIPTION "add initfailed state for scripts"
+     REVISION "201610230000Z"
+     DESCRIPTION "add per interface linkbeat option"
      REVISION "201610180000Z"
      DESCRIPTION "add promote_secondaries"
      REVISION "201609120000Z"
@@ -89,10 +155,11 @@ VrrpState ::= TEXTUAL-CONVENTION
     "Represents a VRRP state."
     SYNTAX INTEGER {
         init(0),
-    backup(1),
-    master(2),
-    fault(3),
-    unknown(4)
+        backup(1),
+        master(2),
+        fault(3),
+        unknown(4),
+        shutdown(5)
     }
 
 RouteType ::= TEXTUAL-CONVENTION
@@ -217,6 +284,38 @@ smtpServerPort OBJECT-TYPE
         "Port of SMTP server."
     ::= { mail 6 }
 
+smtpEmailFaults OBJECT-TYPE
+    SYNTAX INTEGER { enabled(1), disabled(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Email vrrp fault state transitions."
+    ::= { mail 7 }
+
+smtpEmailSmtpAlert OBJECT-TYPE
+    SYNTAX INTEGER { on(1), off(2), unset(3) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Email default smtp alert."
+    ::= { mail 8 }
+
+smtpEmailSmtpAlertVrrp OBJECT-TYPE
+    SYNTAX INTEGER { on(1), off(2), unset(3) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Email default smtp alert for vrrp."
+    ::= { mail 9 }
+
+smtpEmailSmtpAlertChecker OBJECT-TYPE
+    SYNTAX INTEGER { on(1), off(2), unset(3) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Email default smtp alert for checkers."
+    ::= { mail 10 }
+
 emailEntry OBJECT-TYPE
     SYNTAX EmailEntry
     MAX-ACCESS not-accessible
@@ -298,6 +397,22 @@ dbus OBJECT-TYPE
         "True if the DBus interface is enabled."
     ::= { global 9 }
 
+dynamicInterfaces OBJECT-TYPE
+    SYNTAX TruthValue
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "True if dynamic interfaces is enabled."
+    ::= { global 10 }
+
+lvsFlushOnStop OBJECT-TYPE
+    SYNTAX INTEGER { enabled(1), disabled(2), flushVS(3) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Indicate whether LVS config is flushed at shutdown."
+    ::= { global 11 }
+
 -- ----------------------------------------------------------------------
 -- VRRP part
 -- ----------------------------------------------------------------------
@@ -331,7 +446,9 @@ VrrpSyncGroupEntry ::= SEQUENCE {
     vrrpSyncGroupScriptMaster DisplayString,
     vrrpSyncGroupScriptBackup DisplayString,
     vrrpSyncGroupScriptFault DisplayString,
-    vrrpSyncGroupScript DisplayString
+    vrrpSyncGroupScript DisplayString,
+    vrrpSyncGroupTrackingWeight INTEGER,
+    vrrpSyncGroupScriptStop DisplayString
 }
 
 vrrpSyncGroupIndex OBJECT-TYPE
@@ -405,6 +522,302 @@ vrrpSyncGroupScript OBJECT-TYPE
     DESCRIPTION
         "Script to execute whenever a state change occurs."
     ::= {vrrpSyncGroupEntry 9 }
+
+vrrpSyncGroupTrackingWeight OBJECT-TYPE
+    SYNTAX INTEGER { enabled(1), disabled(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Allow differing tracking weights for sync group members"
+    ::= {vrrpSyncGroupEntry 10 }
+
+vrrpSyncGroupScriptStop OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Script to execute when the keepalived stops."
+    ::= {vrrpSyncGroupEntry 11 }
+
+
+vrrpSyncTrackedInterfaceTable OBJECT-TYPE
+    SYNTAX SEQUENCE OF VrrpSyncTrackedInterfaceEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Table of tracked interfaces for each VRRP instance."
+    ::= { vrrp 14 }
+
+vrrpSyncTrackedInterfaceEntry OBJECT-TYPE
+    SYNTAX VrrpSyncTrackedInterfaceEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Information describing a tracked interface"
+    INDEX { vrrpSyncGroupIndex, ifIndex }
+    ::= { vrrpSyncTrackedInterfaceTable 1 }
+
+VrrpSyncTrackedInterfaceEntry ::= SEQUENCE {
+    vrrpSyncTrackedInterfaceName DisplayString,
+    vrrpSyncTrackedInterfaceWeight Integer32,
+    vrrpSyncTrackedInterfaceWgtRev Integer32
+}
+
+vrrpSyncTrackedInterfaceName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Name of the tracked interface."
+    ::= { vrrpSyncTrackedInterfaceEntry 1 }
+
+vrrpSyncTrackedInterfaceWeight OBJECT-TYPE
+    SYNTAX Integer32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight of the tracked interface."
+    ::= { vrrpSyncTrackedInterfaceEntry 2 }
+
+vrrpSyncTrackedInterfaceWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight reversed for the tracked interface."
+    ::= { vrrpSyncTrackedInterfaceEntry 3 }
+
+vrrpSyncTrackedScriptTable OBJECT-TYPE
+    SYNTAX SEQUENCE OF VrrpSyncTrackedScriptEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Table of tracked scripts for each VRRP instance."
+    ::= { vrrp 15 }
+
+vrrpSyncTrackedScriptEntry OBJECT-TYPE
+    SYNTAX VrrpSyncTrackedScriptEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Information describing a tracked script"
+    INDEX { vrrpSyncGroupIndex, vrrpSyncTrackedScriptIndex }
+    ::= { vrrpSyncTrackedScriptTable 1 }
+
+VrrpSyncTrackedScriptEntry ::= SEQUENCE {
+    vrrpSyncTrackedScriptIndex Integer32,
+    vrrpSyncTrackedScriptName DisplayString,
+    vrrpSyncTrackedScriptWeight Integer32,
+    vrrpSyncTrackedScriptWgtRev Integer32
+}
+
+vrrpSyncTrackedScriptIndex OBJECT-TYPE
+    SYNTAX Integer32 (1..2147483647)
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Index of the tracked script in the set of tracked scripts for
+         the given VRRP instance. This index has no relation with the
+         index of vrrpSyncScriptTable."
+    ::= { vrrpSyncTrackedScriptEntry 1 }
+
+vrrpSyncTrackedScriptName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Name of the tracked interface."
+    ::= { vrrpSyncTrackedScriptEntry 2 }
+
+vrrpSyncTrackedScriptWeight OBJECT-TYPE
+    SYNTAX Integer32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight of the tracked interface."
+    ::= { vrrpSyncTrackedScriptEntry 3 }
+
+vrrpSyncTrackedScriptWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight reversed for the tracked interface."
+    ::= { vrrpSyncTrackedScriptEntry 4 }
+
+vrrpSyncTrackedFileTable OBJECT-TYPE
+    SYNTAX SEQUENCE OF VrrpSyncTrackedFileEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Table of tracked files for each sync group."
+    ::= { vrrp 16 }
+
+vrrpSyncTrackedFileEntry OBJECT-TYPE
+    SYNTAX VrrpSyncTrackedFileEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Information describing a tracked file"
+    INDEX { vrrpSyncGroupIndex, vrrpSyncTrackedFileIndex }
+    ::= { vrrpSyncTrackedFileTable 1 }
+
+VrrpSyncTrackedFileEntry ::= SEQUENCE {
+    vrrpSyncTrackedFileIndex Integer32,
+    vrrpSyncTrackedFileName DisplayString,
+    vrrpSyncTrackedFileWeight Integer32,
+    vrrpSyncTrackedFileWgtRev Integer32
+}
+
+vrrpSyncTrackedFileIndex OBJECT-TYPE
+    SYNTAX Integer32 (1..2147483647)
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Index of the tracked file in the set of tracked files for
+         the given VRRP instance. This index has no relation with the
+         index of vrrpSyncFileTable."
+    ::= { vrrpSyncTrackedFileEntry 1 }
+
+vrrpSyncTrackedFileName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Name of the tracked file."
+    ::= { vrrpSyncTrackedFileEntry 2 }
+
+vrrpSyncTrackedFileWeight OBJECT-TYPE
+    SYNTAX Integer32 (-254..254)
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight of the tracked file."
+    ::= { vrrpSyncTrackedFileEntry 3 }
+
+vrrpSyncTrackedFileWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight reversed for the tracked file."
+    ::= { vrrpSyncTrackedFileEntry 4 }
+
+vrrpSyncTrackedBfdTable OBJECT-TYPE
+    SYNTAX SEQUENCE OF VrrpSyncTrackedBfdEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Table of tracked BFDs for each sync group."
+    ::= { vrrp 19 }
+
+vrrpSyncTrackedBfdEntry OBJECT-TYPE
+    SYNTAX VrrpSyncTrackedBfdEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Information describing a tracked BFD"
+    INDEX { vrrpSyncGroupIndex, vrrpSyncTrackedBfdIndex }
+    ::= { vrrpSyncTrackedBfdTable 1 }
+
+VrrpSyncTrackedBfdEntry ::= SEQUENCE {
+    vrrpSyncTrackedBfdIndex Integer32,
+    vrrpSyncTrackedBfdName DisplayString,
+    vrrpSyncTrackedBfdWeight Integer32,
+    vrrpSyncTrackedBfdWgtRev Integer32
+}
+
+vrrpSyncTrackedBfdIndex OBJECT-TYPE
+    SYNTAX Integer32 (1..2147483647)
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Index of the tracked BFD in the set of tracked BFDs for
+         the given VRRP instance. This index has no relation with the
+         index of vrrpSyncBfdTable."
+    ::= { vrrpSyncTrackedBfdEntry 1 }
+
+vrrpSyncTrackedBfdName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Name of the tracked BFD."
+    ::= { vrrpSyncTrackedBfdEntry 2 }
+
+vrrpSyncTrackedBfdWeight OBJECT-TYPE
+    SYNTAX Integer32 (-254..254)
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight of the tracked BFD."
+    ::= { vrrpSyncTrackedBfdEntry 3 }
+
+vrrpSyncTrackedBfdWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight reversed for the tracked BFD."
+    ::= { vrrpSyncTrackedBfdEntry 4 }
+
+vrrpSyncTrackedProcessTable OBJECT-TYPE
+    SYNTAX SEQUENCE OF VrrpSyncTrackedProcessEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Table of tracked processes for each sync group."
+    ::= { vrrp 22 }
+
+vrrpSyncTrackedProcessEntry OBJECT-TYPE
+    SYNTAX VrrpSyncTrackedProcessEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Information describing a tracked process"
+    INDEX { vrrpSyncGroupIndex, vrrpSyncTrackedProcessIndex }
+    ::= { vrrpSyncTrackedProcessTable 1 }
+
+VrrpSyncTrackedProcessEntry ::= SEQUENCE {
+    vrrpSyncTrackedProcessIndex Integer32,
+    vrrpSyncTrackedProcessName DisplayString,
+    vrrpSyncTrackedProcessWeight Integer32,
+    vrrpSyncTrackedProcessWgtRev INTEGER
+}
+
+vrrpSyncTrackedProcessIndex OBJECT-TYPE
+    SYNTAX Integer32 (1..2147483647)
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Index of the tracked process in the set of tracked processes for
+         the given VRRP instance. This index has no relation with the
+         index of vrrpSyncProcessTable."
+    ::= { vrrpSyncTrackedProcessEntry 1 }
+
+vrrpSyncTrackedProcessName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Name of the tracked process."
+    ::= { vrrpSyncTrackedProcessEntry 2 }
+
+vrrpSyncTrackedProcessWeight OBJECT-TYPE
+    SYNTAX Integer32 (-254..254)
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight of the tracked process."
+    ::= { vrrpSyncTrackedProcessEntry 3 }
+
+vrrpSyncTrackedProcessWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight reversed for the tracked process."
+    ::= { vrrpSyncTrackedProcessEntry 4 }
 
 vrrpSyncGroupMemberTable OBJECT-TYPE
     SYNTAX SEQUENCE OF VrrpSyncGroupMemberEntry
@@ -495,7 +908,10 @@ VrrpInstanceEntry ::= SEQUENCE {
     vrrpInstanceScriptStop DisplayString,
     vrrpInstanceScript DisplayString,
     vrrpInstanceAccept INTEGER,
-    vrrpInstancePromoteSecondaries INTEGER
+    vrrpInstancePromoteSecondaries INTEGER,
+    vrrpInstanceUseLinkbeat INTEGER,
+    vrrpInstanceVrrpVersion INTEGER,
+    vrrpInstanceScriptMstrRxLowerPri DisplayString
 }
 
 vrrpInstanceIndex OBJECT-TYPE
@@ -596,7 +1012,7 @@ vrrpInstanceTrackPrimaryIf OBJECT-TYPE
 
 vrrpInstanceAdvertisementsInt OBJECT-TYPE
     SYNTAX Unsigned32
-    UNITS "seconds"
+    UNITS "seconds(VRRPv2) / centiseconds(VRRPv3)"
     MAX-ACCESS read-only
     STATUS current
     DESCRIPTION
@@ -739,6 +1155,30 @@ vrrpInstancePromoteSecondaries OBJECT-TYPE
         "Set promote_secondaries on interface."
     ::= { vrrpInstanceEntry 28 }
 
+vrrpInstanceUseLinkbeat OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-write
+    STATUS current
+    DESCRIPTION
+        "Use linkbeat for interface status."
+    ::= { vrrpInstanceEntry 29 }
+
+vrrpInstanceVrrpVersion OBJECT-TYPE
+    SYNTAX INTEGER { vrrpv2(2), vrrpv3(3) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "VRRP protocol version."
+    ::= { vrrpInstanceEntry 30 }
+
+vrrpInstanceScriptMstrRxLowerPri OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Script to execute when master instance receives lower priority advert."
+    ::= { vrrpInstanceEntry 31 }
+
 vrrpTrackedInterfaceTable OBJECT-TYPE
     SYNTAX SEQUENCE OF VrrpTrackedInterfaceEntry
     MAX-ACCESS not-accessible
@@ -758,7 +1198,8 @@ vrrpTrackedInterfaceEntry OBJECT-TYPE
 
 VrrpTrackedInterfaceEntry ::= SEQUENCE {
     vrrpTrackedInterfaceName DisplayString,
-    vrrpTrackedInterfaceWeight Integer32
+    vrrpTrackedInterfaceWeight Integer32,
+    vrrpTrackedInterfaceWgtRev Integer32
 }
 
 vrrpTrackedInterfaceName OBJECT-TYPE
@@ -777,12 +1218,20 @@ vrrpTrackedInterfaceWeight OBJECT-TYPE
         "Weight of the tracked interface."
     ::= { vrrpTrackedInterfaceEntry 2 }
 
+vrrpTrackedInterfaceWgtRev OBJECT-TYPE
+    SYNTAX Integer32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight reverse for the tracked interface."
+    ::= { vrrpTrackedInterfaceEntry 3 }
+
 vrrpTrackedScriptTable OBJECT-TYPE
     SYNTAX SEQUENCE OF VrrpTrackedScriptEntry
     MAX-ACCESS not-accessible
     STATUS current
     DESCRIPTION
-        "Table of tracked interfaces for each VRRP instance."
+        "Table of tracked scripts for each VRRP instance."
     ::= { vrrp 5 }
 
 vrrpTrackedScriptEntry OBJECT-TYPE
@@ -797,7 +1246,8 @@ vrrpTrackedScriptEntry OBJECT-TYPE
 VrrpTrackedScriptEntry ::= SEQUENCE {
     vrrpTrackedScriptIndex Integer32,
     vrrpTrackedScriptName DisplayString,
-    vrrpTrackedScriptWeight Integer32
+    vrrpTrackedScriptWeight Integer32,
+    vrrpTrackedScriptWgtRev Integer32
 }
 
 vrrpTrackedScriptIndex OBJECT-TYPE
@@ -825,6 +1275,14 @@ vrrpTrackedScriptWeight OBJECT-TYPE
     DESCRIPTION
         "Weight of the tracked interface."
     ::= { vrrpTrackedScriptEntry 3 }
+
+vrrpTrackedScriptWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight reverse for the tracked interface."
+    ::= { vrrpTrackedScriptEntry 4 }
 
 -- IP addresses
 -- see vrrp_ipaddress.h
@@ -859,7 +1317,8 @@ VrrpAddressEntry ::= SEQUENCE {
     vrrpAddressIfName DisplayString,
     vrrpAddressIfAlias DisplayString,
     vrrpAddressStatus INTEGER,
-    vrrpAddressAdvertising INTEGER
+    vrrpAddressAdvertising INTEGER,
+    vrrpAddressPeer InetAddress
 }
 
 vrrpAddressIndex OBJECT-TYPE
@@ -950,6 +1409,14 @@ vrrpAddressAdvertising OBJECT-TYPE
         "Status of VRRP advertising for this IP address."
     ::= { vrrpAddressEntry 11 }
 
+vrrpAddressPeer OBJECT-TYPE
+    SYNTAX InetAddress
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "The peer address."
+    ::= { vrrpAddressEntry 12 }
+
 -- Routes
 -- see vrrp_iproute.h
 
@@ -1025,7 +1492,8 @@ VrrpRouteEntry ::= SEQUENCE {
     vrrpRouteEncapTOS Unsigned32,
     vrrpRouteEncapTTL Unsigned32,
     vrrpRouteEncapFlags Unsigned32,
-    vrrpRouteEncapIlaLocator Counter64
+    vrrpRouteEncapIlaLocator Counter64,
+    vrrpRouteFastOpenNoCookie TruthValue
 }
 
 vrrpRouteIndex OBJECT-TYPE
@@ -1166,7 +1634,7 @@ vrrpRouteTos OBJECT-TYPE
 
 vrrpRouteProtocol OBJECT-TYPE
     SYNTAX INTEGER { unspec(1), redirect(2), kernel(3), boot(4), static(5), gated(9), ra(10), mrt(11),
-		      zebra(12), bird(13), dnrouted(14), xorp(15), ntk(16), dhcp(17) }
+		      zebra(12), bird(13), dnrouted(14), xorp(15), ntk(16), dhcp(17), keepalived(112) }
     MAX-ACCESS read-only
     STATUS current
     DESCRIPTION
@@ -1461,6 +1929,14 @@ vrrpRouteEncapIlaLocator OBJECT-TYPE
         "ILA locator for this encapsulation."
     ::= { vrrpRouteEntry 54 }
 
+vrrpRouteFastOpenNoCookie OBJECT-TYPE
+    SYNTAX TruthValue
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Fast open no cookie."
+    ::= { vrrpRouteEntry 55 }
+
 -- Route next hops
 -- see vrrp_iproute.h
 
@@ -1700,7 +2176,14 @@ VrrpRuleEntry ::= SEQUENCE {
     vrrpRuleTunnelIdHigh Unsigned32,
     vrrpRuleTunnelIdLow Unsigned32,
     vrrpRuleUidRangeStart Unsigned32,
-    vrrpRuleUidRangeEnd Unsigned32
+    vrrpRuleUidRangeEnd Unsigned32,
+    vrrpRuleL3mdev TruthValue,
+    vrrpRuleProtocol INTEGER,
+    vrrpRuleIPProto Unsigned32,
+    vrrpRuleSrcPortStart Unsigned32,
+    vrrpRuleSrcPortEnd Unsigned32,
+    vrrpRuleDstPortStart Unsigned32,
+    vrrpRuleDstPortEnd Unsigned32
 }
 
 vrrpRuleIndex OBJECT-TYPE
@@ -1951,6 +2434,64 @@ vrrpRuleUidRangeEnd OBJECT-TYPE
         "Rule Uid range end."
     ::= { vrrpRuleEntry 31 }
 
+vrrpRuleL3mdev OBJECT-TYPE
+    SYNTAX TruthValue
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Use routing device specified for layer 3 VRF device."
+    ::= { vrrpRuleEntry 32 }
+
+vrrpRuleProtocol OBJECT-TYPE
+    SYNTAX INTEGER { unspec(1), redirect(2), kernel(3), boot(4), static(5), gated(9), ra(10), mrt(11),
+		      zebra(12), bird(13), dnrouted(14), xorp(15), ntk(16), dhcp(17), keepalived(112) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Rule protocol identifier."
+    ::= { vrrpRuleEntry 33 }
+
+vrrpRuleIPProto OBJECT-TYPE
+    SYNTAX Unsigned32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Rule IP protocol."
+    ::= { vrrpRuleEntry 34 }
+
+vrrpRuleSrcPortStart OBJECT-TYPE
+    SYNTAX Unsigned32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Rule source port range start."
+    ::= { vrrpRuleEntry 35 }
+
+vrrpRuleSrcPortEnd OBJECT-TYPE
+    SYNTAX Unsigned32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Rule source port range end."
+    ::= { vrrpRuleEntry 36 }
+
+vrrpRuleDstPortStart OBJECT-TYPE
+    SYNTAX Unsigned32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Rule destination port range start."
+    ::= { vrrpRuleEntry 37 }
+
+vrrpRuleDstPortEnd OBJECT-TYPE
+    SYNTAX Unsigned32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Rule destination port range end."
+    ::= { vrrpRuleEntry 38 }
+
+
 -- VRRP scripts
 -- see vrrp_track.h
 
@@ -1979,7 +2520,8 @@ VrrpScriptEntry ::= SEQUENCE {
     vrrpScriptWeight Integer32,
     vrrpScriptResult INTEGER,
     vrrpScriptRise Unsigned32,
-    vrrpScriptFall Unsigned32
+    vrrpScriptFall Unsigned32,
+    vrrpScriptWgtRev Integer32
 }
 
 vrrpScriptIndex OBJECT-TYPE
@@ -2025,11 +2567,9 @@ vrrpScriptWeight OBJECT-TYPE
 
 vrrpScriptResult OBJECT-TYPE
     SYNTAX INTEGER {
-        disabled(0),
         init(1),
         bad(2),
         good(3),
-        initgood(4),
         initfailed(5)
            }
     MAX-ACCESS read-only
@@ -2053,6 +2593,484 @@ vrrpScriptFall OBJECT-TYPE
     DESCRIPTION
         "How many times the script should fail before KO."
     ::= { vrrpScriptEntry 8 }
+
+vrrpScriptWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight reverse for the script if successful."
+    ::= { vrrpScriptEntry 9 }
+
+-- VRRP files
+-- see vrrp_track.h
+
+vrrpTrackedFileTable OBJECT-TYPE
+    SYNTAX SEQUENCE OF VrrpTrackedFileEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Table of tracked files for each VRRP instance."
+    ::= { vrrp 12 }
+
+vrrpTrackedFileEntry OBJECT-TYPE
+    SYNTAX VrrpTrackedFileEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Information describing a tracked file"
+    INDEX { vrrpInstanceIndex, vrrpTrackedFileIndex }
+    ::= { vrrpTrackedFileTable 1 }
+
+VrrpTrackedFileEntry ::= SEQUENCE {
+    vrrpTrackedFileIndex Integer32,
+    vrrpTrackedFileName DisplayString,
+    vrrpTrackedFileWeight Integer32,
+    vrrpTrackedFileWgtRev Integer32
+}
+
+vrrpTrackedFileIndex OBJECT-TYPE
+    SYNTAX Integer32 (1..2147483647)
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Index of the tracked file in the set of tracked files for
+         the given VRRP instance. This index has no relation with the
+         index of vrrpFileTable."
+    ::= { vrrpTrackedFileEntry 1 }
+
+vrrpTrackedFileName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Name of the tracked file."
+    ::= { vrrpTrackedFileEntry 2 }
+
+vrrpTrackedFileWeight OBJECT-TYPE
+    SYNTAX Integer32 (-254..254)
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight of the tracked file."
+    ::= { vrrpTrackedFileEntry 3 }
+
+vrrpTrackedFileWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight reverse for the tracked file."
+    ::= { vrrpTrackedFileEntry 4 }
+
+vrrpFileTable OBJECT-TYPE
+    SYNTAX SEQUENCE OF VrrpFileEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Table of VRRP files"
+    ::= { vrrp 13 }
+
+vrrpFileEntry OBJECT-TYPE
+    SYNTAX VrrpFileEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Information describing a VRRP file"
+    INDEX { vrrpFileIndex }
+    ::= { vrrpFileTable 1 }
+
+VrrpFileEntry ::= SEQUENCE {
+    vrrpFileIndex Integer32,
+    vrrpFileName DisplayString,
+    vrrpFilePath DisplayString,
+    vrrpFileResult INTEGER,
+    vrrpFileWeight Integer32,
+    vrrpFileWgtRev Integer32
+}
+
+vrrpFileIndex OBJECT-TYPE
+    SYNTAX Integer32 (1..2147483647)
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "File index."
+    ::= { vrrpFileEntry 1 }
+
+vrrpFileName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Symbolic name of the file."
+    ::= { vrrpFileEntry 2 }
+
+vrrpFilePath OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Path of track file."
+    ::= { vrrpFileEntry 3 }
+
+vrrpFileResult OBJECT-TYPE
+    SYNTAX Integer32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Current status of the file."
+    ::= { vrrpFileEntry 4 }
+
+vrrpFileWeight OBJECT-TYPE
+    SYNTAX Integer32 (-254..254)
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Default weight of the tracked file."
+    ::= { vrrpFileEntry 5 }
+
+vrrpFileWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Default weight reverse for the tracked file."
+    ::= { vrrpFileEntry 6 }
+
+-- VRRP track BFD
+-- see vrrp_track.h
+
+vrrpTrackedBfdTable OBJECT-TYPE
+    SYNTAX SEQUENCE OF VrrpTrackedBfdEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Table of tracked BFDs for each VRRP instance."
+    ::= { vrrp 17 }
+
+vrrpTrackedBfdEntry OBJECT-TYPE
+    SYNTAX VrrpTrackedBfdEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Information describing a tracked BFD"
+    INDEX { vrrpInstanceIndex, vrrpTrackedBfdIndex }
+    ::= { vrrpTrackedBfdTable 1 }
+
+VrrpTrackedBfdEntry ::= SEQUENCE {
+    vrrpTrackedBfdIndex Integer32,
+    vrrpTrackedBfdName DisplayString,
+    vrrpTrackedBfdWeight Integer32,
+    vrrpTrackedBfdWgtRev Integer32
+}
+
+vrrpTrackedBfdIndex OBJECT-TYPE
+    SYNTAX Integer32 (1..2147483647)
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Index of the tracked BFD in the set of tracked BFDs for
+         the given VRRP instance. This index has no relation with the
+         index of vrrpBfdTable."
+    ::= { vrrpTrackedBfdEntry 1 }
+
+vrrpTrackedBfdName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Name of the tracked BFD."
+    ::= { vrrpTrackedBfdEntry 2 }
+
+vrrpTrackedBfdWeight OBJECT-TYPE
+    SYNTAX Integer32 (-254..254)
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight of the tracked BFD."
+    ::= { vrrpTrackedBfdEntry 3 }
+
+vrrpTrackedBfdWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight reverse for the tracked BFD."
+    ::= { vrrpTrackedBfdEntry 4 }
+
+vrrpBfdTable OBJECT-TYPE
+    SYNTAX SEQUENCE OF VrrpBfdEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Table of VRRP BFDs"
+    ::= { vrrp 18 }
+
+vrrpBfdEntry OBJECT-TYPE
+    SYNTAX VrrpBfdEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Information describing a VRRP BFD"
+    INDEX { vrrpBfdIndex }
+    ::= { vrrpBfdTable 1 }
+
+VrrpBfdEntry ::= SEQUENCE {
+    vrrpBfdIndex Integer32,
+    vrrpBfdName DisplayString,
+    vrrpBfdResult INTEGER,
+    vrrpBfdWeight Integer32,
+    vrrpBfdWgtRev Integer32
+}
+
+vrrpBfdIndex OBJECT-TYPE
+    SYNTAX Integer32 (1..2147483647)
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Bfd index."
+    ::= { vrrpBfdEntry 1 }
+
+vrrpBfdName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Symbolic name of the BFD."
+    ::= { vrrpBfdEntry 2 }
+
+vrrpBfdResult OBJECT-TYPE
+    SYNTAX Integer32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Current status of the BFD."
+    ::= { vrrpBfdEntry 3 }
+
+vrrpBfdWeight OBJECT-TYPE
+    SYNTAX Integer32 (-254..254)
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Default weight of the tracked BFD."
+    ::= { vrrpBfdEntry 4 }
+
+vrrpBfdWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Default weight reverse for the tracked BFD."
+    ::= { vrrpBfdEntry 5 }
+
+-- VRRP track process
+-- see vrrp_track.h
+
+vrrpTrackedProcessTable OBJECT-TYPE
+    SYNTAX SEQUENCE OF VrrpTrackedProcessEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Table of tracked processes for each VRRP instance."
+    ::= { vrrp 20 }
+
+vrrpTrackedProcessEntry OBJECT-TYPE
+    SYNTAX VrrpTrackedProcessEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Information describing a tracked process"
+    INDEX { vrrpInstanceIndex, vrrpTrackedProcessIndex }
+    ::= { vrrpTrackedProcessTable 1 }
+
+VrrpTrackedProcessEntry ::= SEQUENCE {
+    vrrpTrackedProcessIndex Integer32,
+    vrrpTrackedProcessName DisplayString,
+    vrrpTrackedProcessWeight Integer32,
+    vrrpTrackedProcessWgtRev Integer32
+}
+
+vrrpTrackedProcessIndex OBJECT-TYPE
+    SYNTAX Integer32 (1..2147483647)
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Index of the tracked process in the set of tracked processes for
+         the given VRRP instance. This index has no relation with the
+         index of vrrpProcessTable."
+    ::= { vrrpTrackedProcessEntry 1 }
+
+vrrpTrackedProcessName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Name of the tracked process."
+    ::= { vrrpTrackedProcessEntry 2 }
+
+vrrpTrackedProcessWeight OBJECT-TYPE
+    SYNTAX Integer32 (-254..254)
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight of the tracked process."
+    ::= { vrrpTrackedProcessEntry 3 }
+
+vrrpTrackedProcessWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Weight reverse for the tracked process."
+    ::= { vrrpTrackedProcessEntry 4 }
+
+vrrpProcessTable OBJECT-TYPE
+    SYNTAX SEQUENCE OF VrrpProcessEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Table of VRRP processes"
+    ::= { vrrp 21 }
+
+vrrpProcessEntry OBJECT-TYPE
+    SYNTAX VrrpProcessEntry
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Information describing a VRRP process"
+    INDEX { vrrpProcessIndex }
+    ::= { vrrpProcessTable 1 }
+
+VrrpProcessEntry ::= SEQUENCE {
+    vrrpProcessIndex Integer32,
+    vrrpProcessName DisplayString,
+    vrrpProcessPath DisplayString,
+    vrrpProcessParams DisplayString,
+    vrrpProcessParamMatch INTEGER,
+    vrrpProcessWeight Integer32,
+    vrrpProcessWgtRev INTEGER,
+    vrrpProcessQuorum Unsigned32,
+    vrrpProcessQuorumMax Integer32,
+    vrrpProcessForkDelay Unsigned32,
+    vrrpProcessTerminateDelay Unsigned32,
+    vrrpProcessFullCommand INTEGER,
+    vrrpProcessCurProc Integer32,
+    vrrpProcessResult INTEGER
+}
+
+vrrpProcessIndex OBJECT-TYPE
+    SYNTAX Integer32 (1..2147483647)
+    MAX-ACCESS not-accessible
+    STATUS current
+    DESCRIPTION
+        "Process index."
+    ::= { vrrpProcessEntry 1 }
+
+vrrpProcessName OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Symbolic name of the process."
+    ::= { vrrpProcessEntry 2 }
+
+vrrpProcessPath OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Path of the process."
+    ::= { vrrpProcessEntry 3 }
+
+vrrpProcessParams OBJECT-TYPE
+    SYNTAX DisplayString
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Parameters to check of the process."
+    ::= { vrrpProcessEntry 4 }
+
+vrrpProcessParamMatch OBJECT-TYPE
+    SYNTAX INTEGER { none(0), exact(1), partial(2), initial(3) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Match type of the parameters."
+    ::= { vrrpProcessEntry 5 }
+
+vrrpProcessWeight OBJECT-TYPE
+    SYNTAX Integer32 (-254..254)
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Default weight of the tracked process."
+    ::= { vrrpProcessEntry 6 }
+
+vrrpProcessWgtRev OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Default weight reverse for the tracked process."
+    ::= { vrrpProcessEntry 7 }
+
+vrrpProcessQuorum OBJECT-TYPE
+    SYNTAX Unsigned32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Quorum of number of patching processes required."
+    ::= { vrrpProcessEntry 8 }
+
+vrrpProcessQuorumMax OBJECT-TYPE
+    SYNTAX Integer32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Maximum number of matching processes required."
+    ::= { vrrpProcessEntry 9 }
+
+vrrpProcessForkDelay OBJECT-TYPE
+    SYNTAX Unsigned32
+    UNITS "microseconds"
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Delay before consider new process running."
+    ::= { vrrpProcessEntry 10 }
+
+vrrpProcessTerminateDelay OBJECT-TYPE
+    SYNTAX Unsigned32
+    UNITS "microseconds"
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Delay before consider process terminated."
+    ::= { vrrpProcessEntry 11 }
+
+vrrpProcessFullCommand OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "True if full path named used rather than comm string."
+    ::= { vrrpProcessEntry 12 }
+
+vrrpProcessCurProc OBJECT-TYPE
+    SYNTAX Integer32
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Number of matching processes currently running."
+    ::= { vrrpProcessEntry 13 }
+
+vrrpProcessResult OBJECT-TYPE
+    SYNTAX INTEGER { true(1), false(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Current status of the process."
+    ::= { vrrpProcessEntry 14 }
 
 -- Traps
 
@@ -2318,7 +3336,17 @@ VirtualServerEntry ::= SEQUENCE {
     virtualServerRetry Unsigned32,
     virtualServerDelayBeforeRetry Unsigned32,
     virtualServerWarmup Unsigned32,
-    virtualServerWeight INTEGER
+    virtualServerWeight INTEGER,
+    virtualServerSmtpAlert INTEGER,
+    virtualServerMHFallback TruthValue,
+    virtualServerMHPort TruthValue,
+    virtualServerDelayLoopUsec Unsigned32,
+    virtualServerDelayBeforeRetrUsec Unsigned32,
+    virtualServerWarmupUsec Unsigned32,
+    virtualServerConnTimeoutUsec Unsigned32,
+    virtualServerTunnelType INTEGER,
+    virtualServerTunnelPort InetPortNumber,
+    virtualServerTunnelCsum INTEGER
 }
 
 virtualServerIndex OBJECT-TYPE
@@ -2409,6 +3437,7 @@ virtualServerLoadBalancingAlgo OBJECT-TYPE
     nq(10),
     fo(11),
     ovf(12),
+    mh(13),
     unknown(99)
     }
     MAX-ACCESS read-only
@@ -2527,7 +3556,7 @@ virtualServerQuorum OBJECT-TYPE
     ::= { virtualServerEntry 22 }
 
 virtualServerQuorumStatus OBJECT-TYPE
-    SYNTAX INTEGER { met(1), notMet(2) }
+    SYNTAX INTEGER { met(1), notMet(2), shutdown(3) }
     MAX-ACCESS read-only
     STATUS current
     DESCRIPTION
@@ -2866,6 +3895,91 @@ virtualServerWeight OBJECT-TYPE
         "Default wieght for each real server."
     ::= { virtualServerEntry 60 }
 
+virtualServerSmtpAlert OBJECT-TYPE
+    SYNTAX INTEGER { enabled(1), disabled(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Will SMTP alert be sent for this virtual server?"
+    ::= { virtualServerEntry 61 }
+
+virtualServerMHFallback OBJECT-TYPE
+    SYNTAX TruthValue
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "If set to true(1), MH scheduler fallback."
+    ::= { virtualServerEntry 62 }
+
+virtualServerMHPort OBJECT-TYPE
+    SYNTAX TruthValue
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "If set to true(1), MH scheduler use port."
+    ::= { virtualServerEntry 63 }
+
+virtualServerDelayLoopUsec OBJECT-TYPE
+    SYNTAX Unsigned32
+    UNITS "micro-seconds"
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Delay in micro-seconds between two checks."
+    ::= { virtualServerEntry 64 }
+
+virtualServerDelayBeforeRetrUsec OBJECT-TYPE
+    SYNTAX Unsigned32
+    UNITS "micro-seconds"
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Default number of micro-seconds between retrying a checker ofter it has failed."
+    ::= { virtualServerEntry 65 }
+
+virtualServerWarmupUsec OBJECT-TYPE
+    SYNTAX Unsigned32
+    UNITS "micro-seconds"
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Maximum number of micro-seconds to delay before running checker."
+    ::= { virtualServerEntry 66 }
+
+virtualServerConnTimeoutUsec OBJECT-TYPE
+    SYNTAX Unsigned32
+    UNITS "micro-seconds"
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Maximum number of micro-seconds for checker to establish connection."
+    ::= { virtualServerEntry 67 }
+
+virtualServerTunnelType OBJECT-TYPE
+    SYNTAX INTEGER { ipip(1), gue(2), gre(3) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Default forwarding tunnel type use for this virtual server."
+    ::= { virtualServerEntry 68 }
+
+virtualServerTunnelPort OBJECT-TYPE
+    SYNTAX InetPortNumber
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Default forwarding tunnel GUE port use for this virtual server."
+    ::= { virtualServerEntry 69 }
+
+virtualServerTunnelCsum OBJECT-TYPE
+    SYNTAX INTEGER { nocsum(1), csum(2), remcsum(3) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Default forwarding tunnel checksum type use for this virtual server."
+    ::= { virtualServerEntry 70 }
+
+
 -- real servers
 
 realServerTable OBJECT-TYPE
@@ -2931,7 +4045,15 @@ RealServerEntry ::= SEQUENCE {
     realServerRetry Unsigned32,
     realServerDelayBeforeRetry Unsigned32,
     realServerWarmup Unsigned32,
-    realServerDelayLoop Unsigned32
+    realServerDelayLoop Unsigned32,
+    realServerSmtpAlert INTEGER,
+    realServerDelayBeforeRetryUsec Unsigned32,
+    realServerWarmupUsec Unsigned32,
+    realServerDelayLoopUsec Unsigned32,
+    realServerConnTimeoutUsec Unsigned32,
+    realServerTunnelType INTEGER,
+    realServerTunnelPort InetPortNumber,
+    realServerTunnelCsum INTEGER
 }
 
 realServerIndex OBJECT-TYPE
@@ -3323,7 +4445,7 @@ realServerDelayBeforeRetry OBJECT-TYPE
     MAX-ACCESS read-only
     STATUS current
     DESCRIPTION
-        "Default number of seconds between retrying a checker ofter it has failed."
+        "Default number of seconds between retrying a checker after it has failed."
     ::= { realServerEntry 44 }
 
 realServerWarmup OBJECT-TYPE
@@ -3343,6 +4465,74 @@ realServerDelayLoop OBJECT-TYPE
     DESCRIPTION
         "Delay in seconds between two checks."
     ::= { realServerEntry 46 }
+
+realServerSmtpAlert OBJECT-TYPE
+    SYNTAX INTEGER { enabled(1), disabled(2) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Will SMTP alert be sent for this real server?"
+    ::= {realServerEntry 47 }
+
+realServerDelayBeforeRetryUsec OBJECT-TYPE
+    SYNTAX Unsigned32
+    UNITS "micro-seconds"
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Default number of micro-seconds between retrying a checker after it has failed."
+    ::= { realServerEntry 48 }
+
+realServerWarmupUsec OBJECT-TYPE
+    SYNTAX Unsigned32
+    UNITS "micro-seconds"
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Maximum number of micro-seconds to delay before running checker."
+    ::= { realServerEntry 49 }
+
+realServerDelayLoopUsec OBJECT-TYPE
+    SYNTAX Unsigned32
+    UNITS "micro-seconds"
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Delay in micro-seconds between two checks."
+    ::= { realServerEntry 50 }
+
+realServerConnTimeoutUsec OBJECT-TYPE
+    SYNTAX Unsigned32
+    UNITS "micro-seconds"
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Maximum number of micro-seconds for checker to establish connection."
+    ::= { realServerEntry 51 }
+
+realServerTunnelType OBJECT-TYPE
+    SYNTAX INTEGER { ipip(1), gue(2), gre(3) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Forwarding tunnel type use for this real server."
+    ::= { realServerEntry 52 }
+
+realServerTunnelPort OBJECT-TYPE
+    SYNTAX InetPortNumber
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Forwarding tunnel GUE port use for this real server."
+    ::= { realServerEntry 53 }
+
+realServerTunnelCsum OBJECT-TYPE
+    SYNTAX INTEGER { nocsum(1), csum(2), remcsum(3) }
+    MAX-ACCESS read-only
+    STATUS current
+    DESCRIPTION
+        "Forwarding tunnel checksum type use for this real server."
+    ::= { realServerEntry 54 }
 
 lvsSyncDaemon    OBJECT IDENTIFIER ::= { check 6 }
 
@@ -3521,7 +4711,10 @@ vrrpCompliances MODULE-COMPLIANCE
     vrrpScriptGroup,
     vrrpSyncGroup,
     vrrpInstanceGroup,
-    vrrpTrapsGroup
+    vrrpTrapsGroup,
+    vrrpFileGroup,
+    vrrpBfdGroup,
+    vrrpProcessGroup
     }
     ::= { compliances 2 }
 
@@ -3562,12 +4755,18 @@ globalGroup OBJECT-GROUP
     emailFrom,
     emailAddress,
     smtpServerPort,
+    smtpEmailFaults,
+    smtpEmailSmtpAlert,
+    smtpEmailSmtpAlertVrrp,
+    smtpEmailSmtpAlertChecker,
     trapEnable,
     linkBeat,
     lvsFlush,
     ipvs64BitStats,
     netNamespace,
-    dbus
+    dbus,
+    dynamicInterfaces,
+    lvsFlushOnStop
     }
     STATUS current
     DESCRIPTION
@@ -3586,7 +4785,24 @@ vrrpSyncGroup OBJECT-GROUP
     vrrpSyncGroupScriptBackup,
     vrrpSyncGroupScriptFault,
     vrrpSyncGroupScript,
-    vrrpSyncGroupMemberName
+    vrrpSyncGroupTrackingWeight,
+    vrrpSyncGroupScriptStop,
+    vrrpSyncGroupMemberName,
+    vrrpSyncTrackedInterfaceName,
+    vrrpSyncTrackedInterfaceWeight,
+    vrrpSyncTrackedInterfaceWgtRev,
+    vrrpSyncTrackedScriptName,
+    vrrpSyncTrackedScriptWeight,
+    vrrpSyncTrackedScriptWgtRev,
+    vrrpSyncTrackedFileName,
+    vrrpSyncTrackedFileWeight,
+    vrrpSyncTrackedFileWgtRev,
+    vrrpSyncTrackedBfdName,
+    vrrpSyncTrackedBfdWeight,
+    vrrpSyncTrackedBfdWgtRev,
+    vrrpSyncTrackedProcessName,
+    vrrpSyncTrackedProcessWeight,
+    vrrpSyncTrackedProcessWgtRev
     }
     STATUS current
     DESCRIPTION
@@ -3620,10 +4836,24 @@ vrrpInstanceGroup OBJECT-GROUP
     vrrpInstanceScript,
     vrrpInstanceAccept,
     vrrpInstancePromoteSecondaries,
+    vrrpInstanceUseLinkbeat,
+    vrrpInstanceVrrpVersion,
+    vrrpInstanceScriptMstrRxLowerPri,
     vrrpTrackedInterfaceName,
     vrrpTrackedInterfaceWeight,
+    vrrpTrackedInterfaceWgtRev,
     vrrpTrackedScriptName,
     vrrpTrackedScriptWeight,
+    vrrpTrackedScriptWgtRev,
+    vrrpTrackedFileName,
+    vrrpTrackedFileWeight,
+    vrrpTrackedFileWgtRev,
+    vrrpTrackedBfdName,
+    vrrpTrackedBfdWeight,
+    vrrpTrackedBfdWgtRev,
+    vrrpTrackedProcessName,
+    vrrpTrackedProcessWeight,
+    vrrpTrackedProcessWgtRev,
     vrrpAddressType,
     vrrpAddressValue,
     vrrpAddressBroadcast,
@@ -3634,6 +4864,7 @@ vrrpInstanceGroup OBJECT-GROUP
     vrrpAddressIfAlias,
     vrrpAddressStatus,
     vrrpAddressAdvertising,
+    vrrpAddressPeer,
     vrrpRouteAddressType,
     vrrpRouteDestination,
     vrrpRouteDestinationMask,
@@ -3687,6 +4918,7 @@ vrrpInstanceGroup OBJECT-GROUP
     vrrpRouteEncapTTL,
     vrrpRouteEncapFlags,
     vrrpRouteEncapIlaLocator,
+    vrrpRouteFastOpenNoCookie,
     vrrpRouteNextHopAddressType,
     vrrpRouteNextHopAddress,
     vrrpRouteNextHopIfIndex,
@@ -3728,7 +4960,14 @@ vrrpInstanceGroup OBJECT-GROUP
     vrrpRuleTunnelIdHigh,
     vrrpRuleTunnelIdLow,
     vrrpRuleUidRangeStart,
-    vrrpRuleUidRangeEnd
+    vrrpRuleUidRangeEnd,
+    vrrpRuleL3mdev,
+    vrrpRuleProtocol,
+    vrrpRuleIPProto,
+    vrrpRuleSrcPortStart,
+    vrrpRuleSrcPortEnd,
+    vrrpRuleDstPortStart,
+    vrrpRuleDstPortEnd
     }
     STATUS current
     DESCRIPTION
@@ -3743,7 +4982,8 @@ vrrpScriptGroup OBJECT-GROUP
     vrrpScriptWeight,
     vrrpScriptResult,
     vrrpScriptRise,
-    vrrpScriptFall
+    vrrpScriptFall,
+    vrrpScriptWgtRev
     }
     STATUS current
     DESCRIPTION
@@ -3781,6 +5021,52 @@ vrrpObsoleteInstanceGroup OBJECT-GROUP
     DESCRIPTION
         "Obsolete group for VRRP instances."
     ::= { vrrpGroups 6 }
+
+vrrpFileGroup OBJECT-GROUP
+    OBJECTS {
+    vrrpFileName,
+    vrrpFilePath,
+    vrrpFileResult,
+    vrrpFileWeight,
+    vrrpFileWgtRev
+    }
+    STATUS current
+    DESCRIPTION
+        "Conformance group for VRRP track files."
+    ::= { vrrpGroups 7 }
+
+vrrpBfdGroup OBJECT-GROUP
+    OBJECTS {
+    vrrpBfdName,
+    vrrpBfdResult,
+    vrrpBfdWeight,
+    vrrpBfdWgtRev
+    }
+    STATUS current
+    DESCRIPTION
+        "Conformance group for VRRP track BFDs."
+    ::= { vrrpGroups 8 }
+
+vrrpProcessGroup OBJECT-GROUP
+    OBJECTS {
+    vrrpProcessName,
+    vrrpProcessPath,
+    vrrpProcessParams,
+    vrrpProcessParamMatch,
+    vrrpProcessWeight,
+    vrrpProcessWgtRev,
+    vrrpProcessQuorum,
+    vrrpProcessQuorumMax,
+    vrrpProcessForkDelay,
+    vrrpProcessTerminateDelay,
+    vrrpProcessFullCommand,
+    vrrpProcessCurProc,
+    vrrpProcessResult
+    }
+    STATUS current
+    DESCRIPTION
+        "Conformance group for VRRP track processes."
+    ::= { vrrpGroups 9 }
 
 checkGroups OBJECT IDENTIFIER ::= { groups 3 }
 
@@ -3860,7 +5146,17 @@ virtualServerGroup OBJECT-GROUP
     virtualServerRetry,
     virtualServerDelayBeforeRetry,
     virtualServerWarmup,
-    virtualServerWeight
+    virtualServerWeight,
+    virtualServerSmtpAlert,
+    virtualServerMHFallback,
+    virtualServerMHPort,
+    virtualServerDelayLoopUsec,
+    virtualServerDelayBeforeRetrUsec,
+    virtualServerWarmupUsec,
+    virtualServerConnTimeoutUsec,
+    virtualServerTunnelType,
+    virtualServerTunnelPort,
+    virtualServerTunnelCsum
     }
     STATUS current
     DESCRIPTION
@@ -3913,7 +5209,15 @@ realServerGroup OBJECT-GROUP
     realServerRetry,
     realServerDelayBeforeRetry,
     realServerWarmup,
-    realServerDelayLoop
+    realServerDelayLoop,
+    realServerSmtpAlert,
+    realServerDelayBeforeRetryUsec,
+    realServerWarmupUsec,
+    realServerDelayLoopUsec,
+    realServerConnTimeoutUsec,
+    realServerTunnelType,
+    realServerTunnelPort,
+    realServerTunnelCsum
     }
     STATUS current
     DESCRIPTION

@@ -22,31 +22,81 @@
 
 #include "config.h"
 
+#include <stdio.h>
+
 #include "list.h"
 #include "memory.h"
 
-/* Simple list helpers functions */
+/* Multiple list helpers functions */
 list
-alloc_list(void (*free_func) (void *), void (*dump_func) (void *))
+alloc_mlist_r(void (*free_func) (void *), void (*dump_func) (FILE *, const void *), size_t size)
 {
-	return alloc_mlist(free_func, dump_func, 1);
-}
-
-static element
-alloc_element(void)
-{
-	element new = (element) MALLOC(sizeof (struct _element));
+	list new = (list) MALLOC(size * sizeof (struct _list));
+	new->free = free_func;
+	new->dump = dump_func;
 	return new;
 }
 
+#ifdef _VRRP_FD_DEBUG_
 void
-list_add(list l, void *data)
+dump_mlist(FILE *fp, list l, size_t size)
 {
-	element e = alloc_element();
+	element e;
+	unsigned i;
 
+	for (i = 0; i < size; i++) {
+		for (e = LIST_HEAD(&l[i]); e; ELEMENT_NEXT(e))
+			if (l->dump)
+				(*l->dump) (fp, e->data);
+	}
+}
+#endif
+
+static void
+free_melement(list l, void (*free_func) (void *))
+{
+	element e;
+	element next;
+
+	for (e = LIST_HEAD(l); e; e = next) {
+		next = e->next;
+		if (free_func)
+			(*free_func) (e->data);
+		FREE(e);
+	}
+}
+
+void
+free_mlist_r(list l, size_t size)
+{
+	size_t i;
+
+	if (!l)
+		return;
+
+	for (i = 0; i < size; i++)
+		free_melement(&l[i], l->free);
+	FREE(l);
+}
+
+/* Simple list helpers functions */
+list
+alloc_list_r(void (*free_func) (void *), void (*dump_func) (FILE *fp, const void *))
+{
+	return alloc_mlist_r(free_func, dump_func, 1);
+}
+
+static element __attribute__ ((malloc))
+alloc_element(void)
+{
+	return (element) MALLOC(sizeof (struct _element));
+}
+
+static inline void
+__list_add(list l, element e)
+{
 	e->prev = l->tail;
-	/* e->next = NULL;	// MALLOC sets this NULL */
-	e->data = data;
+	e->next = NULL;
 
 	if (l->head == NULL)
 		l->head = e;
@@ -57,31 +107,87 @@ list_add(list l, void *data)
 }
 
 void
-list_del(list l, void *data)
+list_add_r(list l, void *data)
+{
+	element e = alloc_element();
+
+	e->data = data;
+
+	__list_add(l, e);
+}
+
+void
+list_add_head_r(list l, void *data)
+{
+	element e = alloc_element();
+
+	e->data = data;
+
+	e->next = l->head;
+	e->prev = NULL;
+
+	if (l->tail == NULL)
+		l->tail = e;
+	else
+		l->head->prev = e;
+	l->head = e;
+	l->count++;
+}
+
+static inline void
+__list_remove(list l, const element e)
+{
+	if (e->prev)
+		e->prev->next = e->next;
+	else
+		l->head = e->next;
+
+	if (e->next)
+		e->next->prev = e->prev;
+	else
+		l->tail = e->prev;
+
+	l->count--;
+}
+
+void
+list_remove_r(list l, const element e)
+{
+	if (l->free)
+		(*l->free) (e->data);
+
+	__list_remove(l, e);
+	FREE_ONLY(e);
+}
+
+void
+list_extract(list l, const element e)
+{
+	__list_remove(l, e);
+}
+
+void
+list_del_r(list l, const void *data)
 {
 	element e;
 
 	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
 		if (ELEMENT_DATA(e) == data) {
-			if (e->prev)
-				e->prev->next = e->next;
-			else
-				l->head = e->next;
-
-			if (e->next)
-				e->next->prev = e->prev;
-			else
-				l->tail = e->prev;
-
-			l->count--;
-			FREE(e);
+			list_remove_r(l, e);
 			return;
 		}
 	}
 }
 
-void *
-list_element(list l, size_t num)
+void
+list_transfer(element e, list l_from, list l_to)
+{
+	__list_remove(l_from, e);
+	__list_add(l_to, e);
+}
+
+void * __attribute__ ((pure))
+list_element(const list l, size_t num)
 {
 	element e = LIST_HEAD(l);
 	size_t i = 0;
@@ -100,7 +206,7 @@ list_element(list l, size_t num)
 }
 
 void
-dump_list(list l)
+dump_list(FILE *fp, const list l)
 {
 	element e;
 
@@ -109,7 +215,13 @@ dump_list(list l)
 
 	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e))
 		if (l->dump)
-			(*l->dump) (e->data);
+			(*l->dump) (fp, e->data);
+}
+
+void
+free_list_element_simple(void *data)
+{
+	FREE(data);
 }
 
 static void
@@ -132,7 +244,7 @@ free_elements(list l)
 }
 
 void
-free_list_elements(list l)
+free_list_elements_r(list l)
 {
 	free_elements(l);
 
@@ -141,7 +253,7 @@ free_list_elements(list l)
 }
 
 void
-free_list(list *lp)
+free_list_r(list *lp)
 {
 	list l = *lp;
 
@@ -156,7 +268,7 @@ free_list(list *lp)
 }
 
 void
-free_list_element(list l, element e)
+free_list_element_r(list l, const element e)
 {
 	if (!l || !e)
 		return;
@@ -171,57 +283,18 @@ free_list_element(list l, element e)
 	if (l->free)
 		(*l->free) (e->data);
 	l->count--;
-	FREE(e);
-}
-
-/* Multiple list helpers functions */
-list
-alloc_mlist(void (*free_func) (void *), void (*dump_func) (void *), size_t size)
-{
-	list new = (list) MALLOC(size * sizeof (struct _list));
-	new->free = free_func;
-	new->dump = dump_func;
-	return new;
-}
-
-#ifdef _INCLUDE_UNUSED_CODE_
-void
-dump_mlist(list l, size_t size)
-{
-	element e;
-	int i;
-
-	for (i = 0; i < size; i++) {
-		for (e = LIST_HEAD(&l[i]); e; ELEMENT_NEXT(e))
-			if (l->dump)
-				(*l->dump) (e->data);
-	}
-}
-#endif
-
-static void
-free_melement(list l, void (*free_func) (void *))
-{
-	element e;
-	element next;
-
-	for (e = LIST_HEAD(l); e; e = next) {
-		next = e->next;
-		if (free_func)
-			(*free_func) (e->data);
-		FREE(e);
-	}
+	FREE_ONLY(e);
 }
 
 void
-free_mlist(list l, size_t size)
+free_list_data_r(list l, const void *data)
 {
-	size_t i;
+	element e;
 
-	if (!l)
-		return;
-
-	for (i = 0; i < size; i++)
-		free_melement(&l[i], l->free);
-	FREE(l);
+	for (e = LIST_HEAD(l); e; ELEMENT_NEXT(e)) {
+		if (ELEMENT_DATA(e) == data) {
+			free_list_element_r(l, e);
+			return;
+		}
+	}
 }

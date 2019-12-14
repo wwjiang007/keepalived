@@ -22,6 +22,9 @@
 
 #include "config.h"
 
+#include <unistd.h>
+#include <stdio.h>
+
 #include "check_tcp.h"
 #include "check_api.h"
 #include "memory.h"
@@ -33,41 +36,40 @@
 #include "parser.h"
 #if !HAVE_DECL_SOCK_CLOEXEC
 #include "old_socket.h"
-#include "string.h"
+#endif
+#ifdef THREAD_DUMP
+#include "scheduler.h"
 #endif
 
-static int tcp_connect_thread(thread_t *);
+static int tcp_connect_thread(thread_ref_t);
 
 /* Configuration stream handling */
 static void
-free_tcp_check(void *data)
+free_tcp_check(checker_t *checker)
 {
-	FREE(CHECKER_CO(data));
-	FREE(CHECKER_DATA(data));
-	FREE(data);
+	FREE(checker->co);
+	FREE(checker);
 }
 
 static void
-dump_tcp_check(void *data)
+dump_tcp_check(FILE *fp, const checker_t *checker)
 {
-	checker_t *checker = data;
-
-	log_message(LOG_INFO, "   Keepalive method = TCP_CHECK");
-	dump_checker_opts(checker);
+	conf_write(fp, "   Keepalive method = TCP_CHECK");
+	dump_checker_opts(fp, checker);
 }
 
 static bool
-tcp_check_compare(void *a, void *b)
+tcp_check_compare(const checker_t *old_c, const checker_t *new_c)
 {
-	return compare_conn_opts(CHECKER_CO(a), CHECKER_CO(b));
+	return compare_conn_opts(old_c->co, new_c->co);
 }
 
 static void
-tcp_check_handler(__attribute__((unused)) vector_t *strvec)
+tcp_check_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	/* queue new checker */
 	queue_checker(free_tcp_check, dump_tcp_check, tcp_connect_thread,
-		      tcp_check_compare, NULL, CHECKER_NEW_CO());
+		      tcp_check_compare, NULL, CHECKER_NEW_CO(), true);
 }
 
 static void
@@ -89,10 +91,12 @@ install_tcp_check_keyword(void)
 }
 
 static void
-tcp_epilog(thread_t * thread, bool is_success)
+tcp_epilog(thread_ref_t thread, bool is_success)
 {
 	checker_t *checker;
 	unsigned long delay;
+	bool checker_was_up;
+	bool rs_was_alive;
 
 	checker = THREAD_ARG(thread);
 
@@ -100,41 +104,52 @@ tcp_epilog(thread_t * thread, bool is_success)
 		delay = checker->delay_loop;
 		checker->retry_it = 0;
 
-		if (is_success && !checker->is_up) {
+		if (is_success && (!checker->is_up || !checker->has_run)) {
 			log_message(LOG_INFO, "TCP connection to %s success."
-					, FMT_TCP_RS(checker));
-			smtp_alert(checker, NULL, NULL,
-				   "UP",
-				   "=> TCP CHECK succeed on service <=");
+					, FMT_CHK(checker));
+			checker_was_up = checker->is_up;
+			rs_was_alive = checker->rs->alive;
 			update_svr_checker_state(UP, checker);
-		} else if (!is_success
-			   && checker->is_up) {
-			if (checker->retry)
+			if (checker->rs->smtp_alert && !checker_was_up &&
+			    (rs_was_alive != checker->rs->alive || !global_data->no_checker_emails))
+				smtp_alert(SMTP_MSG_RS, checker, NULL,
+					   "=> TCP CHECK succeed on service <=");
+		} else if (!is_success && 
+			   (checker->is_up || !checker->has_run)) {
+			if (checker->retry && checker->has_run)
 				log_message(LOG_INFO
-				    , "Check on service %s failed after %d retry."
-				    , FMT_TCP_RS(checker)
+				    , "TCP_CHECK on service %s failed after %u retries."
+				    , FMT_CHK(checker)
 				    , checker->retry);
-			smtp_alert(checker, NULL, NULL,
-				   "DOWN",
-				   "=> TCP CHECK failed on service <=");
+			else
+				log_message(LOG_INFO
+				    , "TCP_CHECK on service %s failed."
+				    , FMT_CHK(checker));
+			checker_was_up = checker->is_up;
+			rs_was_alive = checker->rs->alive;
 			update_svr_checker_state(DOWN, checker);
+			if (checker->rs->smtp_alert && checker_was_up &&
+			    (rs_was_alive != checker->rs->alive || !global_data->no_checker_emails))
+				smtp_alert(SMTP_MSG_RS, checker, NULL,
+					   "=> TCP CHECK failed on service <=");
 		}
 	} else {
 		delay = checker->delay_before_retry;
 		++checker->retry_it;
 	}
 
+	checker->has_run = true;
+
 	/* Register next timer checker */
 	thread_add_timer(thread->master, tcp_connect_thread, checker, delay);
 }
 
 static int
-tcp_check_thread(thread_t * thread)
+tcp_check_thread(thread_ref_t thread)
 {
-	checker_t *checker;
+	checker_t *checker = THREAD_ARG(thread);
 	int status;
 
-	checker = THREAD_ARG(thread);
 	status = tcp_socket_state(thread, tcp_check_thread);
 
 	/* If status = connect_in_progress, next thread is already registered.
@@ -145,19 +160,21 @@ tcp_check_thread(thread_t * thread)
 	case connect_in_progress:
 		break;
 	case connect_success:
-		close(thread->u.fd);
+		thread_close_fd(thread);
 		tcp_epilog(thread, true);
 		break;
 	case connect_timeout:
-		if (checker->is_up)
-			log_message(LOG_INFO, "TCP connection to %s timeout."
-					, FMT_TCP_RS(checker));
+		if (checker->is_up &&
+		    (global_data->checker_log_all_failures || checker->log_all_failures))
+			log_message(LOG_INFO, "TCP connection to %s timedout."
+					, FMT_CHK(checker));
 		tcp_epilog(thread, false);
 		break;
 	default:
-		if (checker->is_up)
+		if (checker->is_up &&
+		    (global_data->checker_log_all_failures || checker->log_all_failures))
 			log_message(LOG_INFO, "TCP connection to %s failed."
-					, FMT_TCP_RS(checker));
+					, FMT_CHK(checker));
 		tcp_epilog(thread, false);
 	}
 
@@ -165,7 +182,7 @@ tcp_check_thread(thread_t * thread)
 }
 
 static int
-tcp_connect_thread(thread_t * thread)
+tcp_connect_thread(thread_ref_t thread)
 {
 	checker_t *checker = THREAD_ARG(thread);
 	conn_opts_t *co = checker->co;
@@ -182,13 +199,18 @@ tcp_connect_thread(thread_t * thread)
 		return 0;
 	}
 
-	if ((fd = socket(co->dst.ss_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP)) == -1) {
+	if ((fd = socket(co->dst.ss_family, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, IPPROTO_TCP)) == -1) {
 		log_message(LOG_INFO, "TCP connect fail to create socket. Rescheduling.");
 		thread_add_timer(thread->master, tcp_connect_thread, checker,
 				checker->delay_loop);
 
 		return 0;
 	}
+
+#if !HAVE_DECL_SOCK_NONBLOCK
+	if (set_sock_flags(fd, F_SETFL, O_NONBLOCK))
+		log_message(LOG_INFO, "Unable to set NONBLOCK on tcp_connect socket - %s (%d)", strerror(errno), errno);
+#endif
 
 #if !HAVE_DECL_SOCK_CLOEXEC
 	if (set_sock_flags(fd, F_SETFD, FD_CLOEXEC))
@@ -201,10 +223,24 @@ tcp_connect_thread(thread_t * thread)
 	if(tcp_connection_state(fd, status, thread, tcp_check_thread,
 			co->connection_to)) {
 		close(fd);
-		log_message(LOG_INFO, "TCP socket bind failed. Rescheduling.");
-		thread_add_timer(thread->master, tcp_connect_thread, checker,
-				checker->delay_loop);
+
+		if (status == connect_fail) {
+			tcp_epilog(thread, false);
+		} else {
+			log_message(LOG_INFO, "TCP socket bind failed. Rescheduling.");
+			thread_add_timer(thread->master, tcp_connect_thread, checker,
+					checker->delay_loop);
+		}
 	}
 
 	return 0;
 }
+
+#ifdef THREAD_DUMP
+void
+register_check_tcp_addresses(void)
+{
+	register_thread_address("tcp_check_thread", tcp_check_thread);
+	register_thread_address("tcp_connect_thread", tcp_connect_thread);
+}
+#endif

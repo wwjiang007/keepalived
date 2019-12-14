@@ -19,10 +19,13 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
+
+#include <openssl/md5.h>
+#include <string.h>
 
 #include "vrrp_ipsecah.h"
 
@@ -30,8 +33,8 @@
 
 /* hmac_md5 computation according to the RFCs 2085 & 2104 */
 void
-hmac_md5(unsigned char *buffer, size_t buffer_len, unsigned char *key, size_t key_len,
-	 unsigned char *digest)
+hmac_md5(const unsigned char *buffer1, size_t buffer1_len, const unsigned char *buffer2, size_t buffer2_len,
+	 const unsigned char *key, size_t key_len, unsigned char *digest)
 {
 	MD5_CTX context;
 	unsigned char k_ipad[BLOCK_SIZE+1];	/* inner padding - key XORd with ipad */
@@ -77,13 +80,15 @@ hmac_md5(unsigned char *buffer, size_t buffer_len, unsigned char *key, size_t ke
 
 	/* Compute inner MD5 */
 	MD5_Init(&context);				/* Init context for 1st pass */
-	MD5_Update(&context, k_ipad, BLOCK_SIZE);		/* start with inner pad */
-	MD5_Update(&context, buffer, buffer_len);	/* next with buffer datagram */
+	MD5_Update(&context, k_ipad, BLOCK_SIZE);	/* start with inner pad */
+	MD5_Update(&context, buffer1, buffer1_len);	/* next with buffer datagram */
+	if (buffer2)
+		MD5_Update(&context, buffer2, buffer2_len); /* next with buffer datagram */
 	MD5_Final(digest, &context);			/* Finish 1st pass */
 
 	/* Compute outer MD5 */
 	MD5_Init(&context);				/* Init context for 2nd pass */
-	MD5_Update(&context, k_opad, BLOCK_SIZE);		/* start with inner pad */
+	MD5_Update(&context, k_opad, BLOCK_SIZE);	/* start with inner pad */
 	MD5_Update(&context, digest, MD5_DIGEST_LENGTH); /* next result of 1st pass */
 	MD5_Final(digest, &context);			/* Finish 2nd pass */
 }

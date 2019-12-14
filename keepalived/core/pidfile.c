@@ -17,20 +17,26 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
 
-#include <sys/types.h>
-#include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
 #include "logger.h"
 #include "pidfile.h"
 #include "main.h"
 #include "bitops.h"
+#include "utils.h"
 
-const char *pid_directory = PID_DIR PACKAGE;
+const char *pid_directory = KEEPALIVED_PID_DIR;
 
 /* Create the directory for non-standard pid files */
 void
@@ -54,7 +60,8 @@ int
 pidfile_write(const char *pid_file, int pid)
 {
 	FILE *pidfile = NULL;
-	int pidfd = creat(pid_file, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	int pidfd = open(pid_file, O_NOFOLLOW | O_CREAT | O_WRONLY | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+
 	if (pidfd != -1) pidfile = fdopen(pidfd, "w");
 
 	if (!pidfile) {
@@ -62,6 +69,11 @@ pidfile_write(const char *pid_file, int pid)
 		       pid_file);
 		return 0;
 	}
+
+	/* Override the umask setting to force the permission bits above */
+	if (umask_val & (S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH))
+		fchmod(pidfd, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+
 	fprintf(pidfile, "%d\n", pid);
 	fclose(pidfile);
 	return 1;
@@ -120,6 +132,10 @@ keepalived_running(unsigned long mode)
 #endif
 #ifdef _WITH_LVS_
 	if (__test_bit(DAEMON_CHECKERS, &mode) && process_running(checkers_pidfile))
+		return true;
+#endif
+#ifdef _WITH_BFD_
+	if (__test_bit(DAEMON_BFD, &mode) && process_running(bfd_pidfile))
 		return true;
 #endif
 	return false;

@@ -23,19 +23,37 @@
 #include "config.h"
 
 /* system includes */
-#include <errno.h>
 #include <openssl/err.h>
 
 /* keepalived includes */
-#include "memory.h"
 #include "utils.h"
 #include "html.h"
-#include "timer.h"
 
 /* genhash includes */
 #include "include/http.h"
 #include "include/layer4.h"
-#include "include/main.h"
+
+/* GET processing command */
+static const char *request_template =
+			"GET %s HTTP/1.%d\r\n"
+			"User-Agent: KeepAlive GenHash Client\r\n"
+			"%s"
+			"Host: %s%s\r\n\r\n";
+
+static const char *request_template_ipv6 =
+			"GET %s HTTP/1.%d\r\n"
+			"User-Agent: KeepAlive GenHash Client\r\n"
+			"%s"
+			"Host: [%s]%s\r\n\r\n";
+
+/* Output delimiters */
+#define DELIM_BEGIN		"-----------------------["
+#define DELIM_END		"]-----------------------\n"
+#define HTTP_HEADER_HEXA	DELIM_BEGIN"    HTTP Header Buffer    "DELIM_END
+#define HTTP_HEADER_ASCII	DELIM_BEGIN" HTTP Header Ascii Buffer "DELIM_END
+#define HTML_HEADER_HEXA	DELIM_BEGIN"        HTML Buffer        "DELIM_END
+#define HTML_HASH		DELIM_BEGIN"    HTML hash resulting    "DELIM_END
+#define HTML_HASH_FINAL		DELIM_BEGIN" HTML hash final resulting "DELIM_END
 
 /*
  * The global design of this checker is the following :
@@ -48,8 +66,7 @@
  * The global synopsis of the inter-thread-call is :
  *
  *     http_request_thread (send SSL GET request)
- *            v
- *     http_response_thread (initialize read stream step)
+ *                v
  *         /             \
  *        /               \
  *       v                 v
@@ -85,18 +102,20 @@ const hash_t hashes[hash_guard] = {
 #define HASH_INIT(sock)		((sock)->hash->init(&(sock)->context))
 #define HASH_UPDATE(sock, buf, len) \
 	if ((sock)->content_len == -1 || (sock)->rx_bytes < (sock)->content_len) \
-		((sock)->hash->update(&(sock)->context, (buf), (sock)->content_len == -1 || (unsigned int)((sock)->content_len - (sock)->rx_bytes >= len ? len : (sock)->content_len - (sock)->rx_bytes)))
+		((sock)->hash->update(&(sock)->context, (buf), (sock)->content_len == -1 || (sock)->content_len - (sock)->rx_bytes >= len ? len : (sock)->content_len - (sock)->rx_bytes))
 #define HASH_FINAL(sock, digest) \
 	((sock)->hash->final((digest), &(sock)->context))
 
 /* free allocated pieces */
 static void
-free_all(thread_t * thread)
+free_all(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
 
-	DBG("Total read size read = %d Bytes, fd:%d\n",
+#ifdef _GENHASH_DEBUG_
+	fprintf(stderr, "Total read size read = %d Bytes, fd:%d\n",
 	    sock_obj->total_size, sock_obj->fd);
+#endif
 
 	if (sock_obj->buffer)
 		FREE(sock_obj->buffer);
@@ -105,27 +124,28 @@ free_all(thread_t * thread)
 	 * Decrement the current global get number.
 	 * => free the reserved thread
 	 */
-	req->response_time = timer_tol(timer_now());
+	req->response_time = timer_long(timer_now());
 	thread_add_terminate_event(thread->master);
 }
 
 /* Simple epilog functions. */
 int
-epilog(thread_t * thread)
+epilog(thread_ref_t thread)
 {
-	DBG("Timeout on URL : [%s]\n", req->url);
+#ifdef _GENHASH_DEBUG_
+	fprintf(stderr, "Timeout on URL : [%s]\n", req->url);
+#endif
 	free_all(thread);
 	return 0;
 }
 
 /* Simple finalization function */
 int
-finalize(thread_t * thread)
+finalize(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
-
 	unsigned char digest_length = HASH_LENGTH(sock_obj);
-	unsigned char digest[digest_length];
+	unsigned char *digest = MALLOC(digest_length);
 	int i;
 
 	/* Compute final hash digest */
@@ -133,7 +153,7 @@ finalize(thread_t * thread)
 	if (req->verbose) {
 		printf("\n");
 		printf(HTML_HASH);
-		dump_buffer((char *) digest, digest_length, stdout);
+		dump_buffer((char *) digest, digest_length, stdout, 0);
 
 		printf(HTML_HASH_FINAL);
 	}
@@ -141,11 +161,14 @@ finalize(thread_t * thread)
 	for (i = 0; i < digest_length; i++)
 		printf("%02x", digest[i]);
 	if (sock_obj->content_len != -1 && sock_obj->content_len != sock_obj->rx_bytes)
-		printf ("\nWARNING - Content-Length (%ld) does not match received bytes (%ld).", sock_obj->content_len, sock_obj->rx_bytes);
+		printf ("\nWARNING - Content-Length (%zd) does not match received bytes (%zd).", sock_obj->content_len, sock_obj->rx_bytes);
 	printf("\n\n");
 
-	DBG("Finalize : [%s]\n", req->url);
+#ifdef _GENHASH_DEBUG_
+	fprintf(stderr, "Finalize : [%s]\n", req->url);
+#endif
 	free_all(thread);
+	FREE(digest);
 	return 0;
 }
 
@@ -153,7 +176,7 @@ finalize(thread_t * thread)
 static void
 http_dump_header(char *buffer, size_t size)
 {
-	dump_buffer(buffer, size, stdout);
+	dump_buffer(buffer, size, stdout, 0);
 	printf(HTTP_HEADER_ASCII);
 	printf("%*s\n", (int)size, buffer);
 }
@@ -161,7 +184,7 @@ http_dump_header(char *buffer, size_t size)
 static ssize_t
 find_content_len(char *buffer, size_t size)
 {
-	char *content_len_str = "Content-Length:";
+	const char *content_len_str = "Content-Length:";
 	unsigned long content_len;
 	bool valid_len = false;
 	char sav_char = buffer[size];
@@ -176,7 +199,7 @@ find_content_len(char *buffer, size_t size)
 		content_len = strtoul(p, &end, 10);
 
 		/* Make sure we have read to the end of the line */
-		if (!*end || *end == '\r' || *end != '\n')
+		if (!*end || *end == '\r' || *end == '\n')
 			valid_len = true;
 	}
 	buffer[size] = sav_char;
@@ -208,10 +231,10 @@ http_process_stream(SOCK * sock_obj, int r)
 			if (r) {
 				if (req->verbose) {
 					printf(HTML_HEADER_HEXA);
-					dump_buffer(sock_obj->extracted, (size_t)r, stdout);
+					dump_buffer(sock_obj->extracted, (size_t)r, stdout, 0);
 				}
 				memmove(sock_obj->buffer, sock_obj->extracted, (size_t)r);
-				HASH_UPDATE(sock_obj, sock_obj->buffer, (ssize_t)r);
+				HASH_UPDATE(sock_obj, sock_obj->buffer, r);
 				sock_obj->rx_bytes += r;
 				r = 0;
 			}
@@ -230,8 +253,8 @@ http_process_stream(SOCK * sock_obj, int r)
 		}
 	} else if (sock_obj->size) {
 		if (req->verbose)
-			dump_buffer(sock_obj->buffer, (size_t)r, stdout);
-		HASH_UPDATE(sock_obj, sock_obj->buffer, (ssize_t)sock_obj->size);
+			dump_buffer(sock_obj->buffer, (size_t)r, stdout, 0);
+		HASH_UPDATE(sock_obj, sock_obj->buffer, sock_obj->size);
 		sock_obj->rx_bytes += sock_obj->size;
 		sock_obj->size = 0;
 	}
@@ -240,8 +263,8 @@ http_process_stream(SOCK * sock_obj, int r)
 }
 
 /* Asynchronous HTTP stream reader */
-int
-http_read_thread(thread_t * thread)
+static int
+http_read_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
 	ssize_t r = 0;
@@ -260,22 +283,24 @@ http_read_thread(thread_t * thread)
 		r = MAX_BUFFER_LENGTH;
 	}
 	memset(sock_obj->buffer + sock_obj->size, 0, (size_t)r);
-	r = read(thread->u.fd, sock_obj->buffer + sock_obj->size, (size_t)r);
+	r = read(thread->u.f.fd, sock_obj->buffer + sock_obj->size, (size_t)r);
 
-	DBG(" [l:%zd,fd:%d]\n", r, sock_obj->fd);
+#ifdef _GENHASH_DEBUG_
+	fprintf(stderr, " [l:%zd,fd:%d]\n", r, sock_obj->fd);
+#endif
 
-	if (r == -1 || r == 0) {	/* -1:error , 0:EOF */
-		if (r == -1) {
-			/* We have encourred a real read error */
-			DBG("Read error with server [%s]:%d: %s\n",
-			    req->ipaddress, ntohs(req->addr_port),
-			    strerror(errno));
-			exit_code = 1;
-			return epilog(thread);
-		}
-
+	if (r == 0) {		/* EOF */
 		/* All the HTTP stream has been parsed */
 		finalize(thread);
+	} else if (r == -1) {	/* error */
+		/* We have encountered a real read error */
+#ifdef _GENHASH_DEBUG_
+		fprintf(stderr, "Read error with server [%s]:%d: %s\n",
+		    req->ipaddress, ntohs(req->addr_port),
+		    strerror(errno));
+#endif
+		exit_code = 1;
+		return epilog(thread);
 	} else {
 		/* Handle the response stream */
 		http_process_stream(sock_obj, (int)r);
@@ -285,23 +310,72 @@ http_read_thread(thread_t * thread)
 		 * Register itself to not perturbe global I/O multiplexer.
 		 */
 		thread_add_read(thread->master, http_read_thread, sock_obj,
-				thread->u.fd, HTTP_CNX_TIMEOUT);
+				thread->u.f.fd, req->timeout, true);
 	}
 
 	return 0;
 }
 
-/*
- * Read get result from the remote web server.
- * Apply trigger check to this result.
- */
+/* remote Web server is connected, send it the get url query.  */
 int
-http_response_thread(thread_t * thread)
+http_request_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
+	char *str_request;
+	const char *request_host;
+	const char *request_host_port;
+	int ret = 0;
+	char *str;
 
 	/* Handle read timeout */
-	if (thread->type == THREAD_READ_TIMEOUT) {
+	if (thread->type == THREAD_WRITE_TIMEOUT) {
+		exit_code = 1;
+		return epilog(thread);
+	}
+
+	/* Allocate & clean the GET string */
+	str_request = (char *) MALLOC(GET_BUFFER_LENGTH);
+
+	if (req->vhost) {
+		/* If vhost was defined we don't need to override it's port */
+		request_host = req->vhost;
+		str = (char*) MALLOC(1);
+		*str = '\0';
+		request_host_port = str;
+	} else {
+		request_host = req->ipaddress;
+
+		/* Allocate a buffer for the port string ( ":" [0-9][0-9][0-9][0-9][0-9] "\0" ) */
+		str = (char*) MALLOC(7);
+		snprintf(str, 7, ":%d", ntohs(req->addr_port));
+		request_host_port = str;
+	}
+
+	snprintf(str_request, GET_BUFFER_LENGTH,
+		 (req->dst && req->dst->ai_family == AF_INET6 && !req->vhost) ? request_template_ipv6 : request_template,
+		  req->url,
+		  req->http_protocol == HTTP_PROTOCOL_1_1 || req->http_protocol == HTTP_PROTOCOL_1_1K ? 1 : 0,
+		  req->http_protocol == HTTP_PROTOCOL_1_0C || req->http_protocol == HTTP_PROTOCOL_1_1 ? "Connection: close\r\n" :
+		    req->http_protocol == HTTP_PROTOCOL_1_0K || req->http_protocol == HTTP_PROTOCOL_1_1K ? "Connection: keep-alive\r\n" : "",
+		  request_host, request_host_port);
+
+	FREE_CONST(request_host_port);
+
+	/* Send the GET request to remote Web server */
+#ifdef _GENHASH_DEBUG_
+	fprintf(stderr, "Sending GET request [%s] on fd:%d\n", req->url, sock_obj->fd);
+#endif
+	if (req->ssl)
+		ret = ssl_send_request(sock_obj->ssl, str_request, (int)strlen(str_request));
+	else
+		ret = (send(sock_obj->fd, str_request, strlen(str_request), 0) != -1) ? 1 : 0;
+
+	FREE(str_request);
+
+	if (!ret) {
+		fprintf(stderr, "Cannot send get request to [%s]:%d.\n",
+			req->ipaddress,
+			ntohs(req->addr_port));
 		exit_code = 1;
 		return epilog(thread);
 	}
@@ -318,72 +392,10 @@ http_response_thread(thread_t * thread)
 	/* Register asynchronous http/ssl read thread */
 	if (req->ssl)
 		thread_add_read(thread->master, ssl_read_thread, sock_obj,
-				thread->u.fd, HTTP_CNX_TIMEOUT);
+				sock_obj->fd, req->timeout, true);
 	else
 		thread_add_read(thread->master, http_read_thread, sock_obj,
-				thread->u.fd, HTTP_CNX_TIMEOUT);
-	return 0;
-}
+				sock_obj->fd, req->timeout, true);
 
-/* remote Web server is connected, send it the get url query.  */
-int
-http_request_thread(thread_t * thread)
-{
-	SOCK *sock_obj = THREAD_ARG(thread);
-	char *str_request;
-	char *request_host;
-	char *request_host_port;
-	int ret = 0;
-
-	/* Handle read timeout */
-	if (thread->type == THREAD_WRITE_TIMEOUT) {
-		exit_code = 1;
-		return epilog(thread);
-	}
-
-	/* Allocate & clean the GET string */
-	str_request = (char *) MALLOC(GET_BUFFER_LENGTH);
-	memset(str_request, 0, GET_BUFFER_LENGTH);
-
-	if (req->vhost) {
-		/* If vhost was defined we don't need to override it's port */
-		request_host = req->vhost;
-		request_host_port = (char*) MALLOC(1);
-		*request_host_port = 0;
-	} else {
-		request_host = req->ipaddress;
-
-		/* Allocate a buffer for the port string ( ":" [0-9][0-9][0-9][0-9][0-9] "\0" ) */
-		request_host_port = (char*) MALLOC(7);
-		snprintf(request_host_port, 7, ":%d",
-		 ntohs(req->addr_port));
-	}
-
-	snprintf(str_request, GET_BUFFER_LENGTH,
-		 (req->dst && req->dst->ai_family == AF_INET6 && !req->vhost) ? REQUEST_TEMPLATE_IPV6 : REQUEST_TEMPLATE,
-		  req->url, request_host, request_host_port);
-
-	FREE(request_host_port);
-
-	/* Send the GET request to remote Web server */
-	DBG("Sending GET request [%s] on fd:%d\n", req->url, sock_obj->fd);
-	if (req->ssl)
-		ret = ssl_send_request(sock_obj->ssl, str_request, (int)strlen(str_request));
-	else
-		ret = (send(sock_obj->fd, str_request, strlen(str_request), 0) != -1) ? 1 : 0;
-
-	FREE(str_request);
-
-	if (!ret) {
-		fprintf(stderr, "Cannot send get request to [%s]:%d.\n",
-			req->ipaddress,
-			ntohs(req->addr_port));
-		exit_code = 1;
-		return epilog(thread);
-	}
-
-	/* Register read timeouted thread */
-	thread_add_read(thread->master, http_response_thread, sock_obj,
-			sock_obj->fd, HTTP_CNX_TIMEOUT);
 	return 1;
 }

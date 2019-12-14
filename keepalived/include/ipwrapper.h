@@ -24,19 +24,11 @@
 #define _IPWRAPPER_H
 
 /* system includes */
-#include <syslog.h>
 #include <stdbool.h>
 
-/* locale includes */
+/* local includes */
 #include "check_data.h"
-#include "smtp.h"
-
-/* NAT netmask */
-#define HOST_NETMASK   0xffffffff
-
-/* firewall rules framework command */
-#define IP_FW_CMD_ADD 0x0001
-#define IP_FW_CMD_DEL 0x0002
+#include "check_api.h"
 
 /* UP & DOWN value */
 #define UP   true
@@ -57,6 +49,7 @@ extern bool init_services(void);
 extern void clear_services(void);
 extern void set_quorum_states(void);
 extern void clear_diff_services(list);
+extern void check_new_rs_state(void);
 extern void link_vsg_to_vs(void);
 
 #endif

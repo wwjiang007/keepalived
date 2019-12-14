@@ -14,7 +14,8 @@ edit = echo "  EDIT     $@"; \
 	 -e 's|@sbindir[@]|$(sbindir)|g' \
 	 -e 's|@localstatedir[@]|$(localstatedir)|g' \
 	 -e 's|@sysconfdir[@]|$(sysconfdir)|g' \
-	 -e 's|@PID_DIR[@]|$(PID_DIR)|g'
+	 -e 's|@PID_DIR[@]|$(PID_DIR)|g' \
+	 -e 's|@SNMP_SERVICE[@]|$(SNMP_SERVICE)|g'
 
 sbin_PROGRAMS		= keepalived
 keepalived_SOURCES	= main.c
@@ -37,17 +38,22 @@ if WITH_DBUS
   DBUS_SUBDIR		= dbus
 endif
 
+if WITH_BFD
+  BFD_SUBDIR		= bfd
+  BFD_LIB		= bfd/libbfd.a
+endif
+
 keepalived.service: Makefile
 	@rm -f $@ $@.tmp
 	@$(edit) '$(srcdir)/$@.in' >$@
 
 keepalived.service: $(srcdir)/keepalived.service.in
 
-SUBDIRS			= core $(VRRP_SUBDIR) $(IPVS_SUBDIR) $(DBUS_SUBDIR) etc
+SUBDIRS			= core $(VRRP_SUBDIR) $(IPVS_SUBDIR) $(DBUS_SUBDIR) $(BFD_SUBDIR) etc
 
 EXTRA_DIST		= keepalived.service.in
 
-keepalived_LDADD	= core/libcore.a $(IPVS_LIB) $(VRRP_LIB) core/libcore.a ../lib/liblib.a $(KA_LIBS)
+keepalived_LDADD	= core/libcore.a $(IPVS_LIB) $(VRRP_LIB) $(BFD_LIB) core/libcore.a ../lib/liblib.a $(KA_LIBS)
 
 MOSTLYCLEANFILES	= keepalived.service
 

@@ -17,7 +17,7 @@
  *              as published by the Free Software Foundation; either version
  *              2 of the License, or (at your option) any later version.
  *
- * Copyright (C) 2001-2016 Alexandre Cassen, <acassen@gmail.com>
+ * Copyright (C) 2001-2017 Alexandre Cassen, <acassen@gmail.com>
  */
 
 #include "config.h"
@@ -46,7 +46,8 @@ null_strvec_handler_t unregister_null_strvec_handler(void)
 	return old_handler;
 }
 
-void *strvec_slot(const vector_t *strvec, size_t index)
+const char *
+strvec_slot(const vector_t *strvec, size_t index)
 {
 	if (strvec &&
 	    index < vector_size(strvec) &&
@@ -64,7 +65,7 @@ void *strvec_slot(const vector_t *strvec, size_t index)
  * allocalted 'size' slot elements then return vector.
  */
 vector_t *
-vector_alloc(void)
+vector_alloc_r(void)
 {
 	vector_t *v = (vector_t *) MALLOC(sizeof(vector_t));
 	return v;
@@ -89,7 +90,7 @@ vector_init(unsigned int size)
 
 /* allocated one slot */
 void
-vector_alloc_slot(vector_t *v)
+vector_alloc_slot_r(vector_t *v)
 {
 	v->allocated += VECTOR_DEFAULT_SIZE;
 	if (v->slot)
@@ -100,7 +101,7 @@ vector_alloc_slot(vector_t *v)
 
 #ifdef _INCLUDE_UNUSED_CODE_
 /* Insert a value into a specific slot */
-void
+static void
 vector_insert_slot(vector_t *v, unsigned int index, void *value)
 {
 	unsigned int i;
@@ -116,8 +117,8 @@ vector_insert_slot(vector_t *v, unsigned int index, void *value)
 }
 
 /* Copy / dup a vector */
-vector_t *
-vector_copy(vector_t *v)
+static vector_t *
+vector_copy(const vector_t *v)
 {
 	unsigned int size;
 	vector_t *new = vector_alloc();
@@ -134,7 +135,7 @@ vector_copy(vector_t *v)
 
 /* Check assigned index, and if it runs short double index pointer */
 static void
-vector_ensure(vector_t *v, unsigned int num)
+vector_ensure(const vector_t *v, unsigned int num)
 {
 	if (v->allocated > num)
 		return;
@@ -152,7 +153,7 @@ vector_ensure(vector_t *v, unsigned int num)
  * after calling this function.
  */
 static int
-vector_empty_slot(vector_t *v)
+vector_empty_slot(const vector_t *v)
 {
 	unsigned int i;
 
@@ -169,8 +170,8 @@ vector_empty_slot(vector_t *v)
 }
 
 /* Set value to the smallest empty slot. */
-int
-vector_set(vector_t *v, void *val)
+static int
+vector_set(const vector_t *v, void *val)
 {
 	unsigned int i;
 
@@ -198,7 +199,7 @@ vector_set_slot(vector_t *v, void *value)
 
 #ifdef _INCLUDE_UNUSED_CODE_
 /* Set value to specified index slot. */
-int
+static int
 vector_set_index(vector_t *v, unsigned int i, void *val)
 {
 	vector_ensure(v, i);
@@ -212,8 +213,8 @@ vector_set_index(vector_t *v, unsigned int i, void *val)
 }
 
 /* Look up vector.  */
-void *
-vector_lookup(vector_t *v, unsigned int i)
+static void *
+vector_lookup(const vector_t *v, unsigned int i)
 {
 	if (i >= v->active)
 		return NULL;
@@ -221,8 +222,8 @@ vector_lookup(vector_t *v, unsigned int i)
 }
 
 /* Lookup vector, ensure it. */
-void *
-vector_lookup_ensure(vector_t *v, unsigned int i)
+static void *
+vector_lookup_ensure(const vector_t *v, unsigned int i)
 {
 	vector_ensure(v, i);
 	return v->slot[i];
@@ -246,8 +247,8 @@ vector_unset(vector_t *v, unsigned int i)
 }
 
 /* Count the number of not empty slot. */
-unsigned int
-vector_count(vector_t *v)
+unsigned int __attribute__ ((pure))
+vector_count(const vector_t *v)
 {
 	unsigned int i;
 	unsigned count = 0;
@@ -283,15 +284,17 @@ vector_only_index_free(void *slot)
 #endif
 
 void
-vector_free(vector_t *v)
+vector_free_r(const vector_t *v)
 {
-	FREE(v->slot);
-	FREE(v);
+	if (v->slot)
+		FREE_CONST_ONLY(v->slot);
+	FREE_CONST_ONLY(v);
 }
 
+#ifdef _INCLUDE_UNUSED_CODE_
 /* dump vector slots */
 void
-vector_dump(FILE *fp, vector_t *v)
+vector_dump(FILE *fp, const vector_t *v)
 {
 	unsigned int i;
 
@@ -303,10 +306,11 @@ vector_dump(FILE *fp, vector_t *v)
 		}
 	}
 }
+#endif
 
 /* String vector related */
 void
-free_strvec(vector_t *strvec)
+free_strvec(const vector_t *strvec)
 {
 	unsigned int i;
 	char *str;
@@ -325,7 +329,7 @@ free_strvec(vector_t *strvec)
 
 #ifdef _INCLUDE_UNUSED_CODE_
 void
-dump_strvec(vector_t *strvec)
+dump_strvec(const vector_t *strvec)
 {
 	unsigned int i;
 	char *str;
