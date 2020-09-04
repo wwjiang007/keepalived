@@ -77,6 +77,8 @@ extern void skip_mem_dump(void);
 extern void enable_mem_log_termination(void);
 
 extern void update_mem_check_log_perms(mode_t);
+extern void log_mem_check_message(const char* format, ...)
+        __attribute__ ((format (printf, 1, 2)));
 #else
 
 extern void *zalloc(unsigned long size);
@@ -96,7 +98,7 @@ typedef union _ptr_hack {
 	const void *cp;
 } ptr_hack_t;
 
-#define FREE_CONST(ptr) { ptr_hack_t ptr_hack = { .cp = ptr }; FREE(ptr_hack.p); }
+#define FREE_CONST(ptr) { ptr_hack_t ptr_hack = { .cp = ptr }; FREE(ptr_hack.p); ptr = NULL; }
 #define FREE_CONST_ONLY(ptr) { ptr_hack_t ptr_hack = { .cp = ptr }; FREE_ONLY(ptr_hack.p); }
 #define REALLOC_CONST(ptr, n) ({ ptr_hack_t ptr_hack = { .cp = ptr }; REALLOC(ptr_hack.p, n); })
 

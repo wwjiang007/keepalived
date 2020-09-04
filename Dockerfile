@@ -1,4 +1,4 @@
-FROM alpine:3.5
+FROM alpine:3.10
 MAINTAINER Bertrand Gouny <bertrand.gouny@osixia.net>
 
 # add keepalived sources to /tmp/keepalived-sources
@@ -12,22 +12,25 @@ RUN addgroup -S keepalived_script && adduser -D -S -G keepalived_script keepaliv
 # 2. compile and install keepalived
 # 3. remove keepalived sources and unnecessary libraries and tools
 RUN apk --no-cache add \
-       gcc \
-       ipset \
-       ipset-dev \
-       iptables \
-       iptables-dev \
-       libnfnetlink \
-       libnfnetlink-dev \
-       libnl3 \
-       libnl3-dev \
-       make \
-       musl-dev \
-       openssl \
-       openssl-dev \
-       autoconf \
+	gcc \
+	ipset \
+	ipset-dev \
+	iptables \
+	iptables-dev \
+	libnfnetlink \
+	libnfnetlink-dev \
+	libnl3 \
+	libnl3-dev \
+	libnftnl-dev \
+	make \
+	musl-dev \
+	openssl \
+	openssl-dev \
+	autoconf \
+	automake \
 
     && cd /tmp/keepalived-sources \
+    && ./build_setup \
     && ./configure --disable-dynamic-linking \
     && make && make install \
     && cd - \
@@ -39,10 +42,12 @@ RUN apk --no-cache add \
 	iptables-dev \
 	libnfnetlink-dev \
 	libnl3-dev \
+	libnftnl-dev \
 	make \
 	musl-dev \
 	openssl-dev \
-	autoconf
+	autoconf \
+	automake
 
 ADD docker/keepalived.conf /usr/local/etc/keepalived/keepalived.conf
 

@@ -22,7 +22,11 @@
 
 #include "config.h"
 
+#include <stdio.h>
 #include <fcntl.h>
+
+/* keepalived includes */
+#include "align.h"
 
 /* genhash includes */
 #include "include/layer4.h"
@@ -40,7 +44,7 @@ tcp_connect(int fd, REQ * req_obj)
 	 * time for a proper shutdown. */
 	li.l_onoff = 1;
 	li.l_linger = 5;
-	if (setsockopt(fd, SOL_SOCKET, SO_LINGER, (char *) &li, sizeof (struct linger)))
+	if (setsockopt(fd, SOL_SOCKET, SO_LINGER, PTR_CAST(char, &li), sizeof (struct linger)))
 		fprintf(stderr, "Error setting SO_LINGER on socket %d\n", fd);
 
 #ifdef _WITH_SO_MARK_
@@ -61,7 +65,7 @@ tcp_connect(int fd, REQ * req_obj)
 		inet_pton(AF_INET6, req_obj->ipaddress, &adr_serv6.sin6_addr);
 
 		/* Call connect function. */
-		ret = connect(fd, (struct sockaddr *) &adr_serv6, long_inet);
+		ret = connect(fd, PTR_CAST(struct sockaddr, &adr_serv6), long_inet);
 	} else {
 		long_inet = sizeof (struct sockaddr_in);
 		memset(&adr_serv, 0, long_inet);
@@ -70,7 +74,7 @@ tcp_connect(int fd, REQ * req_obj)
 		inet_pton(AF_INET, req_obj->ipaddress, &adr_serv.sin_addr);
 
 		/* Call connect function. */
-		ret = connect(fd, (struct sockaddr *) &adr_serv, long_inet);
+		ret = connect(fd, PTR_CAST(struct sockaddr, &adr_serv), long_inet);
 	}
 
 	/* Immediate success */
@@ -106,7 +110,7 @@ tcp_socket_state(thread_ref_t thread, thread_func_t func)
 	/* Check file descriptor */
 	slen = sizeof (status);
 	if (getsockopt
-	    (thread->u.f.fd, SOL_SOCKET, SO_ERROR, (void *) &status, &slen) < 0)
+	    (thread->u.f.fd, SOL_SOCKET, SO_ERROR, (void *)&status, &slen) < 0)
 		ret = errno;
 
 	/* Connection failed !!! */
@@ -173,7 +177,7 @@ tcp_connection_state(int fd, enum connect_result status, thread_ref_t thread
 	}
 }
 
-static int
+static void
 tcp_check_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
@@ -187,7 +191,7 @@ tcp_check_thread(thread_ref_t thread)
 		    req->ipaddress, ntohs(req->addr_port));
 #endif
 		thread_add_terminate_event(thread->master);
-		return -1;
+		return;
 		break;
 
 	case connect_timeout:
@@ -196,7 +200,7 @@ tcp_check_thread(thread_ref_t thread)
 		    req->ipaddress, ntohs(req->addr_port));
 #endif
 		thread_add_terminate_event(thread->master);
-		return -1;
+		return;
 		break;
 
 	case connect_success:{
@@ -206,7 +210,7 @@ tcp_check_thread(thread_ref_t thread)
 			if (ret) {
 				/* SSL connections manage their own threads for SSL_connect */
 				if (req->ssl)
-					return 1;
+					return;
 
 				/* Remote WEB server is connected.
 				 * Unlock eventual locked socket.
@@ -223,16 +227,14 @@ tcp_check_thread(thread_ref_t thread)
 #endif
 				sock_obj->status = connect_error;
 				thread_add_terminate_event(thread->master);
-				return -1;
+				return;
 			}
 		}
 		break;
 	}
-
-	return 1;
 }
 
-int
+void
 tcp_connect_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
@@ -246,7 +248,7 @@ tcp_connect_thread(thread_ref_t thread)
 #ifdef _GENHASH_DEBUG_
 		fprintf(stderr, "WEB connection fail to create socket.\n");
 #endif
-		return 0;
+		return;
 	}
 
 #if !HAVE_DECL_SOCK_NONBLOCK
@@ -259,5 +261,4 @@ tcp_connect_thread(thread_ref_t thread)
 	/* handle tcp connection status & register check worker thread */
 	tcp_connection_state(sock_obj->fd, sock_obj->status, thread, tcp_check_thread,
 			     req->timeout);
-	return 0;
 }

@@ -31,9 +31,7 @@
 #include <pwd.h>
 #include <grp.h>
 #include <ctype.h>
-#ifdef _HAVE_SCHED_RT_
 #include <sched.h>
-#endif
 #include <strings.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -62,10 +60,6 @@
  * not currently exposed to userspace */
 #ifndef TASK_COMM_LEN
 #define TASK_COMM_LEN	16
-#endif
-
-#ifdef _WITH_LVS_
-#define LVS_MAX_TIMEOUT		(86400*31)	/* 31 days */
 #endif
 
 /* data handlers */
@@ -127,9 +121,17 @@ vrrp_process_name_handler(const vector_t *strvec)
 #endif
 #ifdef _WITH_LVS_
 static void
-lvs_process_name_handler(const vector_t *strvec)
+checker_process_name_handler(const vector_t *strvec)
 {
 	save_process_name(&global_data->lvs_process_name, strvec_slot(strvec, 1));
+}
+static void
+lvs_process_name_handler(const vector_t *strvec)
+{
+	/* Deprecated since 12/07/20 */
+	log_message(LOG_INFO, "'lvs_process_name' is deprecated - please use 'checker_process_name'");
+
+	checker_process_name_handler(strvec);
 }
 #endif
 #ifdef _WITH_BFD_
@@ -265,6 +267,115 @@ smtp_alert_handler(const vector_t *strvec)
 
 	global_data->smtp_alert = res;
 }
+
+static void
+startup_shutdown_script(const vector_t *strvec, notify_script_t **script, bool startup)
+{
+	const char *type = startup ? "startup" : "shutdown";
+
+	if (*script) {
+		report_config_error(CONFIG_GENERAL_ERROR, "%s script already specified", type);
+		return;
+	}
+
+	if (vector_size(strvec) < 2) {
+		report_config_error(CONFIG_GENERAL_ERROR, "%s script missing", type);
+		return;
+	}
+
+	if (!(*script = notify_script_init(0, type))) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid %s script", type);
+		return;
+	}
+
+	if (startup) {
+		if (!global_data->startup_script_timeout)
+			global_data->startup_script_timeout = 10;
+	} else {
+		if (!global_data->shutdown_script_timeout)
+			global_data->shutdown_script_timeout = 10;
+	}
+}
+
+static void
+startup_shutdown_script_timeout_handler(const vector_t *strvec, bool startup)
+{
+	const char *type = startup ? "startup" : "shutdown";
+	unsigned delay;
+
+	if (vector_size(strvec) < 2) {
+		report_config_error(CONFIG_GENERAL_ERROR, "%s_script_timeout requires value", type);
+		return;
+	}
+	if (!read_unsigned_strvec(strvec, 1, &delay, 1, 1000, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "%s_script_timeout '%s' must be in [1, 1000] - ignoring", type, strvec_slot(strvec, 1));
+		return;
+	}
+
+	if (startup)
+		global_data->startup_script_timeout = delay;
+	else
+		global_data->shutdown_script_timeout = delay;
+}
+
+static void
+startup_script_handler(const vector_t *strvec)
+{
+	startup_shutdown_script(strvec, &global_data->startup_script, true);
+}
+
+static void
+startup_script_timeout_handler(const vector_t *strvec)
+{
+	startup_shutdown_script_timeout_handler(strvec, true);
+}
+
+static void
+shutdown_script_handler(const vector_t *strvec)
+{
+	startup_shutdown_script(strvec, &global_data->shutdown_script, false);
+}
+
+static void
+shutdown_script_timeout_handler(const vector_t *strvec)
+{
+	startup_shutdown_script_timeout_handler(strvec, false);
+}
+
+static void
+max_auto_priority_handler(const vector_t *strvec)
+{
+	int priority;
+	int max_priority = sched_get_priority_max(SCHED_RR);
+
+	if (vector_size(strvec) < 2) {
+		global_data->max_auto_priority = max_priority;
+		return;
+	}
+
+	if (!read_int_strvec(strvec, 1, &priority, -1, max_priority, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "max_auto_priority '%s' must be in [0, %d] (or -1 to disable) - ignoring", strvec_slot(strvec, 1), max_priority);
+		return;
+	}
+
+	global_data->max_auto_priority = priority;
+}
+static void
+min_auto_priority_delay_handler(const vector_t *strvec)
+{
+	int delay;
+
+	if (vector_size(strvec) < 2) {
+		report_config_error(CONFIG_GENERAL_ERROR, "min_auto_priority_delay requires delay time");
+		return;
+	}
+	if (!read_int_strvec(strvec, 1, &delay, 1, 10000000, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "min_auto_priority_delay '%s' must be in [1, 10000000] - ignoring", strvec_slot(strvec, 1));
+		return;
+	}
+
+	global_data->min_auto_priority_delay = delay;
+}
 #ifdef _WITH_VRRP_
 static void
 smtp_alert_vrrp_handler(const vector_t *strvec)
@@ -324,16 +435,6 @@ default_interface_handler(const vector_t *strvec)
 	}
 	FREE_CONST_PTR(global_data->default_ifname);
 	global_data->default_ifname = set_value(strvec);
-
-	/* On a reload, the VRRP process needs the default_ifp */
-#ifndef _ONE_PROCESS_DEBUG_
-	if (prog_type == PROG_TYPE_VRRP)
-#endif
-	{
-		global_data->default_ifp = if_get_by_ifname(global_data->default_ifname, IF_CREATE_IF_DYNAMIC);
-		if (!global_data->default_ifp)
-			report_config_error(CONFIG_GENERAL_ERROR, "WARNING - default interface %s doesn't exist", global_data->default_ifname);
-	}
 }
 #endif
 #ifdef _WITH_LVS_
@@ -357,7 +458,7 @@ lvs_timeouts(const vector_t *strvec)
 			if (!read_unsigned_strvec(strvec, i + 1, &val, 0, LVS_MAX_TIMEOUT, false))
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid lvs_timeout tcp (%s) - ignoring", strvec_slot(strvec, i+1));
 			else
-				global_data->lvs_tcp_timeout = val;
+				global_data->lvs_timeouts.tcp_timeout = val;
 			i++;	/* skip over value */
 			continue;
 		}
@@ -369,7 +470,7 @@ lvs_timeouts(const vector_t *strvec)
 			if (!read_unsigned_strvec(strvec, i + 1, &val, 0, LVS_MAX_TIMEOUT, false))
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid lvs_timeout tcpfin (%s) - ignoring", strvec_slot(strvec, i+1));
 			else
-				global_data->lvs_tcpfin_timeout = val;
+				global_data->lvs_timeouts.tcp_fin_timeout = val;
 			i++;	/* skip over value */
 			continue;
 		}
@@ -381,7 +482,7 @@ lvs_timeouts(const vector_t *strvec)
 			if (!read_unsigned_strvec(strvec, i + 1, &val, 0, LVS_MAX_TIMEOUT, false))
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid lvs_timeout udp (%s) - ignoring", strvec_slot(strvec, i+1));
 			else
-				global_data->lvs_udp_timeout = val;
+				global_data->lvs_timeouts.udp_timeout = val;
 			i++;	/* skip over value */
 			continue;
 		}
@@ -396,12 +497,12 @@ lvs_syncd_handler(const vector_t *strvec)
 	size_t i;
 
 	if (global_data->lvs_syncd.ifname) {
-		report_config_error(CONFIG_GENERAL_ERROR, "lvs_sync_daemon has already been specified as %s %s - ignoring", global_data->lvs_syncd.ifname, global_data->lvs_syncd.vrrp_name);
+		report_config_error(CONFIG_GENERAL_ERROR, "lvs_sync_daemon has already been specified as %s %s - ignoring", global_data->lvs_syncd.ifname, global_data->lvs_syncd.vrrp_name ? global_data->lvs_syncd.vrrp_name : "");
 		return;
 	}
 
-	if (vector_size(strvec) < 3) {
-		report_config_error(CONFIG_GENERAL_ERROR, "lvs_sync_daemon requires interface, VRRP instance");
+	if (vector_size(strvec) < 2) {
+		report_config_error(CONFIG_GENERAL_ERROR, "lvs_sync_daemon requires interface");
 		return;
 	}
 
@@ -410,29 +511,20 @@ lvs_syncd_handler(const vector_t *strvec)
 		return;
 	}
 
-	if (strlen(strvec_slot(strvec, 2)) >= IP_VS_IFNAME_MAXLEN) {
-		report_config_error(CONFIG_GENERAL_ERROR, "lvs_sync_daemon vrrp interface name '%s' too long - ignoring", strvec_slot(strvec, 2));
-		return;
-	}
-
 	global_data->lvs_syncd.ifname = set_value(strvec);
 
-	if (!(global_data->lvs_syncd.vrrp_name = STRDUP(strvec_slot(strvec, 2))))
-		return;
+	for (i = 2; i < vector_size(strvec); i++) {
+#ifdef _WITH_VRRP_
+		if (!strcmp(strvec_slot(strvec, i), "inst")) {
+			if (global_data->lvs_syncd.vrrp_name)
+				report_config_error(CONFIG_GENERAL_ERROR, "lvs_sync_daemon vrrp instance has already been specified as %s - ignoring", global_data->lvs_syncd.vrrp_name);
+			else
+				global_data->lvs_syncd.vrrp_name = STRDUP(strvec_slot(strvec, i + 1));
 
-	/* This is maintained for backwards compatibility, prior to adding "id" option */
-	if (vector_size(strvec) >= 4 && isdigit(strvec_slot(strvec, 3)[0])) {
-		report_config_error(CONFIG_GENERAL_ERROR, "Please use keyword \"id\" before lvs_sync_daemon syncid value");
-		if (!read_unsigned_strvec(strvec, 3, &val, 0, 255, false))
-			report_config_error(CONFIG_GENERAL_ERROR, "Invalid syncid (%s) - defaulting to vrid", strvec_slot(strvec, 3));
-		else
-			global_data->lvs_syncd.syncid = val;
-		i = 4;
-	}
-	else
-		i = 3;
-
-	for ( ; i < vector_size(strvec); i++) {
+			i++;	/* skip over value */
+			continue;
+		}
+#endif
 		if (!strcmp(strvec_slot(strvec, i), "id")) {
 			if (i == vector_size(strvec) - 1) {
 				report_config_error(CONFIG_GENERAL_ERROR, "No value specified for lvs_sync_daemon id, defaulting to vrid");
@@ -451,7 +543,7 @@ lvs_syncd_handler(const vector_t *strvec)
 				report_config_error(CONFIG_GENERAL_ERROR, "No value specified for lvs_sync_daemon maxlen - ignoring");
 				continue;
 			}
-			if (!read_unsigned_strvec(strvec, i + 1, &val, 0, 65535 - 20 - 8, false))
+			if (!read_unsigned_strvec(strvec, i + 1, &val, 1, 65535 - 20 - 8, false))
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid lvs_sync_daemon maxlen (%s) - ignoring", strvec_slot(strvec, i+1));
 			else
 				global_data->lvs_syncd.sync_maxlen = (uint16_t)val;
@@ -463,7 +555,7 @@ lvs_syncd_handler(const vector_t *strvec)
 				report_config_error(CONFIG_GENERAL_ERROR, "No value specified for lvs_sync_daemon port - ignoring");
 				continue;
 			}
-			if (!read_unsigned_strvec(strvec, i + 1, &val, 0, 65535, false))
+			if (!read_unsigned_strvec(strvec, i + 1, &val, 1, 65535, false))
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid lvs_sync_daemon port (%s) - ignoring", strvec_slot(strvec, i+1));
 			else
 				global_data->lvs_syncd.mcast_port = (uint16_t)val;
@@ -475,7 +567,7 @@ lvs_syncd_handler(const vector_t *strvec)
 				report_config_error(CONFIG_GENERAL_ERROR, "No value specified for lvs_sync_daemon ttl - ignoring");
 				continue;
 			}
-			if (!read_unsigned_strvec(strvec, i + 1, &val, 0, 255, false))
+			if (!read_unsigned_strvec(strvec, i + 1, &val, 1, 255, false))
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid lvs_sync_daemon ttl (%s) - ignoring", strvec_slot(strvec, i+1));
 			else
 				global_data->lvs_syncd.mcast_ttl = (uint8_t)val;
@@ -491,8 +583,8 @@ lvs_syncd_handler(const vector_t *strvec)
 			if (inet_stosockaddr(strvec_slot(strvec, i+1), NULL, &global_data->lvs_syncd.mcast_group))
 				report_config_error(CONFIG_GENERAL_ERROR, "Invalid lvs_sync_daemon group (%s) - ignoring", strvec_slot(strvec, i+1));
 
-			if ((global_data->lvs_syncd.mcast_group.ss_family == AF_INET  && !IN_MULTICAST(htonl(((struct sockaddr_in *)&global_data->lvs_syncd.mcast_group)->sin_addr.s_addr))) ||
-			    (global_data->lvs_syncd.mcast_group.ss_family == AF_INET6 && !IN6_IS_ADDR_MULTICAST(&((struct sockaddr_in6 *)&global_data->lvs_syncd.mcast_group)->sin6_addr))) {
+			if ((global_data->lvs_syncd.mcast_group.ss_family == AF_INET  && !IN_MULTICAST(htonl(PTR_CAST(struct sockaddr_in, &global_data->lvs_syncd.mcast_group)->sin_addr.s_addr))) ||
+			    (global_data->lvs_syncd.mcast_group.ss_family == AF_INET6 && !IN6_IS_ADDR_MULTICAST(&PTR_CAST(struct sockaddr_in6, &global_data->lvs_syncd.mcast_group)->sin6_addr))) {
 				report_config_error(CONFIG_GENERAL_ERROR, "lvs_sync_daemon group address %s is not multicast - ignoring", strvec_slot(strvec, i+1));
 				global_data->lvs_syncd.mcast_group.ss_family = AF_UNSPEC;
 			}
@@ -501,6 +593,25 @@ lvs_syncd_handler(const vector_t *strvec)
 			continue;
 		}
 #endif
+
+		/* The following are for backward compatibility when lvs_sync_daemon IF VRRP_INSTANCE [SYNC_ID] could be specified */
+		if (i == 2) {
+			global_data->lvs_syncd.vrrp_name = STRDUP(strvec_slot(strvec, 2));
+			continue;
+		}
+
+		if (i == 3) {
+			if (!read_unsigned_strvec(strvec, 3, &val, 0, 255, false))
+				report_config_error(CONFIG_GENERAL_ERROR, "Invalid syncid (%s) - defaulting to vrid", strvec_slot(strvec, 3));
+			else {
+				report_config_error(CONFIG_GENERAL_ERROR, "Please use keyword \"id\" before lvs_sync_daemon syncid value");
+				global_data->lvs_syncd.syncid = val;
+			}
+
+			continue;
+		}
+
+		/* We haven't matched anything */
 		report_config_error(CONFIG_GENERAL_ERROR, "Unknown option %s specified for lvs_sync_daemon", strvec_slot(strvec, i));
 	}
 }
@@ -522,7 +633,7 @@ lvs_flush_onstop_handler(const vector_t *strvec)
 		report_config_error(CONFIG_GENERAL_ERROR, "Unknown lvs_flush_onstop type %s", strvec_slot(strvec, 1));
 }
 #endif
-#ifdef _HAVE_SCHED_RT_
+
 static int
 get_realtime_priority(const vector_t *strvec, const char *process)
 {
@@ -592,17 +703,28 @@ get_rt_rlimit(const vector_t *strvec, const char *process)
 {
 	unsigned limit;
 	rlim_t rlim;
+	size_t keyword_len;
+
+	/* *_rlimit_rtime is deprecated since 02/02/2020. Keyword should be *_rlimit_rttime */
+	keyword_len = strlen(strvec_slot(strvec, 0));
+	if (strvec_slot(strvec, 0)[keyword_len - 5] == 'r')
+		log_message(LOG_INFO, "Keyword '%s' is deprecated - please use '%.*srttime'", strvec_slot(strvec, 0), (int)keyword_len - 5, strvec_slot(strvec, 0));
 
 	if (!read_unsigned_strvec(strvec, 1, &limit, 1, UINT32_MAX, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "Invalid %s real-time limit - %s", process, strvec_slot(strvec, 1));
 		return 0;
 	}
 
+	/* The rlim value is divided by 2 elsewhere, and the result must be
+	 * non-zero, therefore we need rlim to have a minimum value of 2. */
+	if (limit == 1)
+		limit = 2;
+
 	rlim = limit;
 	return rlim;
 }
 #endif
-#endif
+
 static int8_t
 get_priority(const vector_t *strvec, const char *process)
 {
@@ -627,7 +749,7 @@ vrrp_mcast_group4_handler(const vector_t *strvec)
 {
 	struct sockaddr_in *mcast = &global_data->vrrp_mcast_group4;
 
-	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, (struct sockaddr_storage *)mcast))
+	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, PTR_CAST(struct sockaddr_storage, mcast)))
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: Cant parse vrrp_mcast_group4 [%s]. Skipping"
 				   , strvec_slot(strvec, 1));
 }
@@ -636,7 +758,7 @@ vrrp_mcast_group6_handler(const vector_t *strvec)
 {
 	struct sockaddr_in6 *mcast = &global_data->vrrp_mcast_group6;
 
-	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, (struct sockaddr_storage *)mcast))
+	if (inet_stosockaddr(strvec_slot(strvec, 1), 0, PTR_CAST(struct sockaddr_storage, mcast)))
 		report_config_error(CONFIG_GENERAL_ERROR, "Configuration error: Cant parse vrrp_mcast_group6 [%s]. Skipping"
 				   , strvec_slot(strvec, 1));
 }
@@ -645,10 +767,10 @@ vrrp_garp_delay_handler(const vector_t *strvec)
 {
 	unsigned timeout;
 
-        if (!read_unsigned_strvec(strvec, 1, &timeout, 0, UINT_MAX / TIMER_HZ, true)) {
+	if (!read_unsigned_strvec(strvec, 1, &timeout, 0, UINT_MAX / TIMER_HZ, true)) {
 		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_garp_master_delay '%s' invalid - ignoring", strvec_slot(strvec, 1));
-                return;
-        }
+		return;
+	}
 
 	global_data->vrrp_garp_delay = timeout * TIMER_HZ;
 }
@@ -675,33 +797,33 @@ vrrp_garp_rep_handler(const vector_t *strvec)
 static void
 vrrp_garp_refresh_handler(const vector_t *strvec)
 {
-        unsigned refresh;
+	unsigned refresh;
 
-        if (!read_unsigned_strvec(strvec, 1, &refresh, 0, UINT_MAX, true)) {
-                report_config_error(CONFIG_GENERAL_ERROR, "Invalid vrrp_garp_master_refresh '%s' - ignoring", strvec_slot(strvec, 1));
-                global_data->vrrp_garp_refresh.tv_sec = 0;
-        }
-        else
+	if (!read_unsigned_strvec(strvec, 1, &refresh, 0, UINT_MAX, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid vrrp_garp_master_refresh '%s' - ignoring", strvec_slot(strvec, 1));
+		global_data->vrrp_garp_refresh.tv_sec = 0;
+	}
+	else
 		global_data->vrrp_garp_refresh.tv_sec = refresh;
 
-        global_data->vrrp_garp_refresh.tv_usec = 0;
+	global_data->vrrp_garp_refresh.tv_usec = 0;
 }
 static void
 vrrp_garp_refresh_rep_handler(const vector_t *strvec)
 {
-        unsigned repeats;
+	unsigned repeats;
 
-        /* The min value should be 1, but allow 0 to maintain backward compatibility
-         * with pre v2.0.7 */
-        if (!read_unsigned_strvec(strvec, 1, &repeats, 0, UINT_MAX, true)) {
-                report_config_error(CONFIG_GENERAL_ERROR, "vrrp_garp_master_refresh_repeat '%s' invalid - ignoring", strvec_slot(strvec, 1));
-                return;
-        }
+	/* The min value should be 1, but allow 0 to maintain backward compatibility
+	 * with pre v2.0.7 */
+	if (!read_unsigned_strvec(strvec, 1, &repeats, 0, UINT_MAX, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_garp_master_refresh_repeat '%s' invalid - ignoring", strvec_slot(strvec, 1));
+		return;
+	}
 
-        if (repeats == 0) {
-                report_config_error(CONFIG_GENERAL_ERROR, "vrrp_garp_master_refresh_repeat must be greater than 0, setting to 1");
-                repeats = 1;
-        }
+	if (repeats == 0) {
+		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_garp_master_refresh_repeat must be greater than 0, setting to 1");
+		repeats = 1;
+	}
 
 	global_data->vrrp_garp_refresh_rep = repeats;
 
@@ -709,12 +831,12 @@ vrrp_garp_refresh_rep_handler(const vector_t *strvec)
 static void
 vrrp_garp_lower_prio_delay_handler(const vector_t *strvec)
 {
-        unsigned delay;
+	unsigned delay;
 
-        if (!read_unsigned_strvec(strvec, 1, &delay, 0, UINT_MAX / TIMER_HZ, true)) {
-                report_config_error(CONFIG_GENERAL_ERROR, "vrrp_garp_lower_prio_delay '%s' invalid - ignoring", strvec_slot(strvec, 1));
-                return;
-        }
+	if (!read_unsigned_strvec(strvec, 1, &delay, 0, UINT_MAX / TIMER_HZ, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "vrrp_garp_lower_prio_delay '%s' invalid - ignoring", strvec_slot(strvec, 1));
+		return;
+	}
 
 	global_data->vrrp_garp_lower_prio_delay = delay * TIMER_HZ;
 }
@@ -723,10 +845,10 @@ vrrp_garp_lower_prio_rep_handler(const vector_t *strvec)
 {
 	unsigned garp_lower_prio_rep;
 
-        if (!read_unsigned_strvec(strvec, 1, &garp_lower_prio_rep, 0, INT_MAX, true)) {
-                report_config_error(CONFIG_GENERAL_ERROR, "Invalid vrrp_garp_lower_prio_repeat '%s'", strvec_slot(strvec, 1));
-                return;
-        }
+	if (!read_unsigned_strvec(strvec, 1, &garp_lower_prio_rep, 0, INT_MAX, true)) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Invalid vrrp_garp_lower_prio_repeat '%s'", strvec_slot(strvec, 1));
+		return;
+	}
 
 	global_data->vrrp_garp_lower_prio_rep = garp_lower_prio_rep;
 }
@@ -817,22 +939,27 @@ vrrp_higher_prio_send_advert_handler(const vector_t *strvec)
 static void
 vrrp_iptables_handler(const vector_t *strvec)
 {
+	if (global_data->vrrp_iptables_inchain) {
+		report_config_error(CONFIG_GENERAL_ERROR, "iptables already specified - ignoring");
+		return;
+	}
+
 	if (vector_size(strvec) >= 2) {
-		if (strlen(strvec_slot(strvec,1)) >= sizeof(global_data->vrrp_iptables_inchain)-1) {
+		if (strlen(strvec_slot(strvec,1)) >= XT_EXTENSION_MAXNAMELEN - 1) {
 			report_config_error(CONFIG_GENERAL_ERROR, "VRRP Error : iptables in chain name too long - ignored");
 			return;
 		}
-		strcpy(global_data->vrrp_iptables_inchain, strvec_slot(strvec,1));
+		global_data->vrrp_iptables_inchain = STRDUP(strvec_slot(strvec,1));
 		if (vector_size(strvec) >= 3) {
-			if (strlen(strvec_slot(strvec,2)) >= sizeof(global_data->vrrp_iptables_outchain)-1) {
+			if (strlen(strvec_slot(strvec,2)) >= XT_EXTENSION_MAXNAMELEN - 1) {
 				report_config_error(CONFIG_GENERAL_ERROR, "VRRP Error : iptables out chain name too long - ignored");
 				return;
 			}
-			strcpy(global_data->vrrp_iptables_outchain, strvec_slot(strvec,2));
+			global_data->vrrp_iptables_outchain = STRDUP(strvec_slot(strvec,2));
 		}
 	} else {
-		strcpy(global_data->vrrp_iptables_inchain, DEFAULT_IPTABLES_CHAIN_IN);
-		strcpy(global_data->vrrp_iptables_outchain, DEFAULT_IPTABLES_CHAIN_OUT);
+		global_data->vrrp_iptables_inchain = STRDUP(DEFAULT_IPTABLES_CHAIN_IN);
+		global_data->vrrp_iptables_outchain = STRDUP(DEFAULT_IPTABLES_CHAIN_OUT);
 	}
 }
 #ifdef _HAVE_LIBIPSET_
@@ -840,74 +967,89 @@ static void
 vrrp_ipsets_handler(const vector_t *strvec)
 {
 	size_t len;
+	char set_name[IPSET_MAXNAMELEN];
 
-	if (vector_size(strvec) >= 2) {
-		if (strlen(strvec_slot(strvec,1)) >= sizeof(global_data->vrrp_ipset_address)-1) {
-			report_config_error(CONFIG_GENERAL_ERROR, "VRRP Error : ipset address name too long - ignored");
-			return;
-		}
-		strcpy(global_data->vrrp_ipset_address, strvec_slot(strvec,1));
-	}
-	else {
+	FREE_CONST_PTR(global_data->vrrp_ipset_address);
+	FREE_CONST_PTR(global_data->vrrp_ipset_address6);
+	FREE_CONST_PTR(global_data->vrrp_ipset_address_iface6);
+#ifdef HAVE_IPSET_ATTR_IFACE
+	FREE_CONST_PTR(global_data->vrrp_ipset_igmp);
+	FREE_CONST_PTR(global_data->vrrp_ipset_mld);
+#endif
+
+	if (vector_size(strvec) < 2) {
 		global_data->using_ipsets = false;
 		return;
 	}
 
+	if (strlen(strvec_slot(strvec,1)) >= IPSET_MAXNAMELEN - 1) {
+		report_config_error(CONFIG_GENERAL_ERROR, "VRRP Error : ipset address name too long - ignored");
+		return;
+	}
+	global_data->vrrp_ipset_address = STRDUP(strvec_slot(strvec,1));
+
 	if (vector_size(strvec) >= 3) {
-		if (strlen(strvec_slot(strvec,2)) >= sizeof(global_data->vrrp_ipset_address6)-1) {
+		if (strlen(strvec_slot(strvec,2)) >= IPSET_MAXNAMELEN - 1) {
 			report_config_error(CONFIG_GENERAL_ERROR, "VRRP Error : ipset IPv6 address name too long - ignored");
 			return;
 		}
-		strcpy(global_data->vrrp_ipset_address6, strvec_slot(strvec,2));
+		global_data->vrrp_ipset_address6 = STRDUP(strvec_slot(strvec,2));
 	}
 	else {
 		/* No second set specified, copy first name and add "6" */
-		strcpy(global_data->vrrp_ipset_address6, global_data->vrrp_ipset_address);
-		global_data->vrrp_ipset_address6[sizeof(global_data->vrrp_ipset_address6) - 2] = '\0';
-		strcat(global_data->vrrp_ipset_address6, "6");
+		strcpy_safe(set_name, global_data->vrrp_ipset_address);
+		set_name[IPSET_MAXNAMELEN - 2] = '\0';
+		strcat(set_name, "6");
+		global_data->vrrp_ipset_address6 = STRDUP(set_name);
 	}
 	if (vector_size(strvec) >= 4) {
-		if (strlen(strvec_slot(strvec,3)) >= sizeof(global_data->vrrp_ipset_address_iface6)-1) {
+		if (strlen(strvec_slot(strvec,3)) >= IPSET_MAXNAMELEN - 1) {
 			report_config_error(CONFIG_GENERAL_ERROR, "VRRP Error : ipset IPv6 address_iface name too long - ignored");
 			return;
 		}
-		strcpy(global_data->vrrp_ipset_address_iface6, strvec_slot(strvec,3));
+		global_data->vrrp_ipset_address_iface6 = STRDUP(strvec_slot(strvec,3));
 	}
 	else {
 		/* No third set specified, copy second name and add "_if6" */
-		strcpy(global_data->vrrp_ipset_address_iface6, global_data->vrrp_ipset_address6);
-		len = strlen(global_data->vrrp_ipset_address_iface6);
-		if (global_data->vrrp_ipset_address_iface6[len-1] == '6')
-			global_data->vrrp_ipset_address_iface6[--len] = '\0';
-		global_data->vrrp_ipset_address_iface6[sizeof(global_data->vrrp_ipset_address_iface6) - 5] = '\0';
-		strcat(global_data->vrrp_ipset_address_iface6, "_if6");
+		strcpy_safe(set_name, global_data->vrrp_ipset_address6);
+		len = strlen(set_name);
+		if (set_name[len-1] == '6')
+			set_name[--len] = '\0';
+		set_name[IPSET_MAXNAMELEN - 5] = '\0';
+		strcat(set_name, "_if6");
+		global_data->vrrp_ipset_address_iface6 = STRDUP(set_name);
 	}
+
+#ifdef HAVE_IPSET_ATTR_IFACE
 	if (vector_size(strvec) >= 5) {
-		if (strlen(strvec_slot(strvec,4)) >= sizeof(global_data->vrrp_ipset_igmp)-1) {
+		if (strlen(strvec_slot(strvec,4)) >= IPSET_MAXNAMELEN - 1) {
 			report_config_error(CONFIG_GENERAL_ERROR, "VRRP Error : ipset IGMP name too long - ignored");
 			return;
 		}
-		strcpy(global_data->vrrp_ipset_igmp, strvec_slot(strvec,4));
+		global_data->vrrp_ipset_igmp = STRDUP(strvec_slot(strvec,4));
 	}
 	else {
 		/* No second set specified, copy first name and add "_igmp" */
-		strcpy(global_data->vrrp_ipset_igmp, global_data->vrrp_ipset_address);
-		global_data->vrrp_ipset_address6[sizeof(global_data->vrrp_ipset_igmp) - 6] = '\0';
-		strcat(global_data->vrrp_ipset_igmp, "_igmp");
+		strcpy_safe(set_name, global_data->vrrp_ipset_address);
+		set_name[sizeof(set_name) - 6] = '\0';
+		strcat(set_name, "_igmp");
+		global_data->vrrp_ipset_igmp = STRDUP(set_name);
 	}
 	if (vector_size(strvec) >= 6) {
-		if (strlen(strvec_slot(strvec,5)) >= sizeof(global_data->vrrp_ipset_mld)-1) {
+		if (strlen(strvec_slot(strvec,5)) >= IPSET_MAXNAMELEN - 1) {
 			report_config_error(CONFIG_GENERAL_ERROR, "VRRP Error : ipset MLD name too long - ignored");
 			return;
 		}
-		strcpy(global_data->vrrp_ipset_mld, strvec_slot(strvec,5));
+		global_data->vrrp_ipset_mld = STRDUP(strvec_slot(strvec,5));
 	}
 	else {
 		/* No second set specified, copy first name and add "_mld" */
-		strcpy(global_data->vrrp_ipset_mld, global_data->vrrp_ipset_address);
-		global_data->vrrp_ipset_mld[sizeof(global_data->vrrp_ipset_mld) - 5] = '\0';
-		strcat(global_data->vrrp_ipset_mld, "_mld");
+		strcpy_safe(set_name, global_data->vrrp_ipset_address);
+		set_name[sizeof(set_name) - 5] = '\0';
+		strcat(set_name, "_mld");
+		global_data->vrrp_ipset_mld = STRDUP(set_name);
 	}
+#endif
 }
 #endif
 #endif
@@ -995,7 +1137,7 @@ vrrp_no_swap_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	global_data->vrrp_no_swap = true;
 }
-#ifdef _HAVE_SCHED_RT_
+
 static void
 vrrp_rt_priority_handler(const vector_t *strvec)
 {
@@ -1017,7 +1159,7 @@ vrrp_rt_rlimit_handler(const vector_t *strvec)
 }
 #endif
 #endif
-#endif
+
 static void
 notify_fifo(const vector_t *strvec, const char *type, notify_fifo_t *fifo)
 {
@@ -1131,7 +1273,7 @@ checker_no_swap_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	global_data->checker_no_swap = true;
 }
-#ifdef _HAVE_SCHED_RT_
+
 static void
 checker_rt_priority_handler(const vector_t *strvec)
 {
@@ -1153,7 +1295,7 @@ checker_rt_rlimit_handler(const vector_t *strvec)
 }
 #endif
 #endif
-#endif
+
 #ifdef _WITH_BFD_
 static void
 bfd_prio_handler(const vector_t *strvec)
@@ -1165,7 +1307,7 @@ bfd_no_swap_handler(__attribute__((unused)) const vector_t *strvec)
 {
 	global_data->bfd_no_swap = true;
 }
-#ifdef _HAVE_SCHED_RT_
+
 static void
 bfd_rt_priority_handler(const vector_t *strvec)
 {
@@ -1187,7 +1329,7 @@ bfd_rt_rlimit_handler(const vector_t *strvec)
 }
 #endif
 #endif
-#endif
+
 #ifdef _WITH_SNMP_
 static void
 snmp_socket_handler(const vector_t *strvec)
@@ -1278,6 +1420,24 @@ net_namespace_handler(const vector_t *strvec)
 	}
 	else
 		report_config_error(CONFIG_GENERAL_ERROR, "Duplicate net_namespace definition %s - ignoring", strvec_slot(strvec, 1));
+}
+
+static void
+net_namespace_ipvs_handler(const vector_t *strvec)
+{
+	if (!strvec)
+		return;
+
+	if (global_data->network_namespace_ipvs) {
+		report_config_error(CONFIG_GENERAL_ERROR, "Duplicate net_namespace_ipvs definition %s - ignoring", strvec_slot(strvec, 1));
+		return;
+	}
+
+	/* No namespace name means default namespace */
+	if (vector_size(strvec) < 2)
+		global_data->network_namespace_ipvs = STRDUP("");
+	else
+		global_data->network_namespace_ipvs = set_value(strvec);
 }
 
 static void
@@ -1774,6 +1934,27 @@ random_seed_handler(const vector_t *strvec)
 	set_random_seed(val);
 }
 
+#ifndef _ONE_PROCESS_DEBUG_
+static void
+reload_time_file_handler(const vector_t *strvec)
+{
+	char *str;
+
+	if (vector_size(strvec) != 2) {
+		report_config_error(CONFIG_GENERAL_ERROR, "reload_time_file invalid");
+		return;
+	}
+	global_data->reload_time_file = str = MALLOC(strlen(strvec_slot(strvec, 1)) + 1);
+	strcpy(str, strvec_slot(strvec, 1));
+}
+
+static void
+reload_repeat_handler(__attribute__((unused)) const vector_t *strvec)
+{
+	global_data->reload_repeat = true;
+}
+#endif
+
 void
 init_global_keywords(bool global_active)
 {
@@ -1783,6 +1964,7 @@ init_global_keywords(bool global_active)
 #endif
 #if HAVE_DECL_CLONE_NEWNET
 	install_keyword_root("net_namespace", &net_namespace_handler, global_active);
+	install_keyword_root("net_namespace_ipvs", &net_namespace_ipvs_handler, global_active);
 	install_keyword_root("namespace_with_ipsets", &namespace_ipsets_handler, global_active);
 #endif
 	install_keyword_root("use_pid_dir", &use_pid_dir_handler, global_active);
@@ -1795,7 +1977,8 @@ init_global_keywords(bool global_active)
 	install_keyword("vrrp_process_name", &vrrp_process_name_handler);
 #endif
 #ifdef _WITH_LVS_
-	install_keyword("lvs_process_name", &lvs_process_name_handler);
+	install_keyword("checker_process_name", &checker_process_name_handler);
+	install_keyword("lvs_process_name", &lvs_process_name_handler);		/* Deprecated since 12/07/20 */
 #endif
 #ifdef _WITH_BFD_
 	install_keyword("bfd_process_name", &bfd_process_name_handler);
@@ -1807,6 +1990,12 @@ init_global_keywords(bool global_active)
 	install_keyword("smtp_connect_timeout", &smtpto_handler);
 	install_keyword("notification_email", &email_handler);
 	install_keyword("smtp_alert", &smtp_alert_handler);
+	install_keyword("startup_script", &startup_script_handler);
+	install_keyword("startup_script_timeout", &startup_script_timeout_handler);
+	install_keyword("shutdown_script", &shutdown_script_handler);
+	install_keyword("shutdown_script_timeout", &shutdown_script_timeout_handler);
+	install_keyword("max_auto_priority", &max_auto_priority_handler);
+	install_keyword("min_auto_priority_delay", &min_auto_priority_delay_handler);
 #ifdef _WITH_VRRP_
 	install_keyword("smtp_alert_vrrp", &smtp_alert_vrrp_handler);
 #endif
@@ -1859,12 +2048,11 @@ init_global_keywords(bool global_active)
 	install_keyword("vrrp_strict", &vrrp_strict_handler);
 	install_keyword("vrrp_priority", &vrrp_prio_handler);
 	install_keyword("vrrp_no_swap", &vrrp_no_swap_handler);
-#ifdef _HAVE_SCHED_RT_
 	install_keyword("vrrp_rt_priority", &vrrp_rt_priority_handler);
 	install_keyword("vrrp_cpu_affinity", &vrrp_cpu_affinity_handler);
 #if HAVE_DECL_RLIMIT_RTTIME == 1
-	install_keyword("vrrp_rlimit_rtime", &vrrp_rt_rlimit_handler);
-#endif
+	install_keyword("vrrp_rlimit_rttime", &vrrp_rt_rlimit_handler);
+	install_keyword("vrrp_rlimit_rtime", &vrrp_rt_rlimit_handler);		/* Deprecated 02/02/2020 */
 #endif
 #endif
 	install_keyword("notify_fifo", &global_notify_fifo);
@@ -1879,23 +2067,21 @@ init_global_keywords(bool global_active)
 	install_keyword("lvs_notify_fifo_script", &lvs_notify_fifo_script);
 	install_keyword("checker_priority", &checker_prio_handler);
 	install_keyword("checker_no_swap", &checker_no_swap_handler);
-#ifdef _HAVE_SCHED_RT_
 	install_keyword("checker_rt_priority", &checker_rt_priority_handler);
 	install_keyword("checker_cpu_affinity", &checker_cpu_affinity_handler);
 #if HAVE_DECL_RLIMIT_RTTIME == 1
-	install_keyword("checker_rlimit_rtime", &checker_rt_rlimit_handler);
-#endif
+	install_keyword("checker_rlimit_rttime", &checker_rt_rlimit_handler);
+	install_keyword("checker_rlimit_rtime", &checker_rt_rlimit_handler);	/* Deprecated 02/02/2020 */
 #endif
 #endif
 #ifdef _WITH_BFD_
 	install_keyword("bfd_priority", &bfd_prio_handler);
 	install_keyword("bfd_no_swap", &bfd_no_swap_handler);
-#ifdef _HAVE_SCHED_RT_
 	install_keyword("bfd_rt_priority", &bfd_rt_priority_handler);
 	install_keyword("bfd_cpu_affinity", &bfd_cpu_affinity_handler);
 #if HAVE_DECL_RLIMIT_RTTIME == 1
-	install_keyword("bfd_rlimit_rtime", &bfd_rt_rlimit_handler);
-#endif
+	install_keyword("bfd_rlimit_rttime", &bfd_rt_rlimit_handler);
+	install_keyword("bfd_rlimit_rtime", &bfd_rt_rlimit_handler);		/* Deprecated 02/02/2020 */
 #endif
 #endif
 #ifdef _WITH_SNMP_
@@ -1952,4 +2138,8 @@ init_global_keywords(bool global_active)
 #endif
 	install_keyword("umask", &umask_handler);
 	install_keyword("random_seed", &random_seed_handler);
+#ifndef _ONE_PROCESS_DEBUG_
+	install_keyword("reload_time_file", &reload_time_file_handler);
+	install_keyword("reload_repeat", &reload_repeat_handler);
+#endif
 }

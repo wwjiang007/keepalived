@@ -23,6 +23,7 @@
 
 #include "config.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -108,6 +109,8 @@ get_signum(const char *sigfunc)
 		return SIGUSR1;
 	else if (!strcmp(sigfunc, "STATS"))
 		return SIGUSR2;
+	else if (!strcmp(sigfunc, "STATS_CLEAR"))
+		return SIGSTATS_CLEAR;
 #ifdef _WITH_JSON_
 	else if (!strcmp(sigfunc, "JSON"))
 		return SIGJSON;
@@ -125,7 +128,7 @@ get_signum(const char *sigfunc)
 static void
 log_sigxcpu(__attribute__((unused)) void * ptr, __attribute__((unused)) int signum)
 {
-	log_message(LOG_INFO, "%s process has used too much CPU time, %s_rlimit_rtime may need to be increased",
+	log_message(LOG_INFO, "%s process has used too much CPU time, %s_rlimit_rttime may need to be increased",
 #ifdef _ONE_PROCESS_DEBUG_
 		    "Main debug",
 #else
@@ -183,7 +186,7 @@ signal_pending(void)
 /* Signal flag */
 #ifndef HAVE_SIGNALFD
 static void
-signal_handler(uint32_t sig)
+signal_handler(int sig)
 {
 	if (write(signal_pipe[1], &sig, sizeof(uint32_t)) != sizeof(uint32_t))
 		log_message(LOG_INFO, "BUG - write to signal_pipe[1] error %d (%s) - please report", errno, strerror(errno));
@@ -220,7 +223,7 @@ signal_set(int signo, void (*func) (void *, int), void *v)
 	else
 		sigdelset(&dfl_sig, signo);
 
-	if (func == (void*)SIG_IGN || func == (void*)SIG_DFL) {
+	if (func == (void *)SIG_IGN || func == (void *)SIG_DFL) {
 		/* We are no longer handling the signal, so
 		 * clear our handlers */
 		func = NULL;
@@ -260,7 +263,7 @@ signal_set(int signo, void (*func) (void *, int), void *v)
 	if (func)
 		sig.sa_handler = signal_handler;
 	else
-		sig.sa_handler = (void*)func;
+		sig.sa_handler = (void *)func;
 
 	sigemptyset(&sig.sa_mask);
 	sig.sa_flags = 0;
@@ -305,7 +308,7 @@ signal_ignore(int signo)
 }
 
 /* Handlers callback  */
-static int
+static void
 signal_run_callback(thread_ref_t thread)
 {
 	uint32_t sig;
@@ -333,8 +336,7 @@ signal_run_callback(thread_ref_t thread)
 		 * do a thread_add_signal() to reinstate itself. */
 		list_for_each_entry_safe(t, t_tmp, &m->signal, next) {
 			if (t->u.val == sig) {
-				list_head_del(&t->next);
-				INIT_LIST_HEAD(&t->next);
+				list_del_init(&t->next);
 				list_add_tail(&t->next, &m->ready);
 				t->type = THREAD_READY;
 			}
@@ -346,8 +348,6 @@ signal_run_callback(thread_ref_t thread)
 	}
 
 	signal_thread = thread_add_read(master, signal_run_callback, NULL, thread->u.f.fd, TIMER_NEVER, false);
-
-	return 0;
 }
 
 static void
@@ -534,11 +534,6 @@ signal_handler_script(void)
 	int sig;
 #ifdef HAVE_SIGNALFD
 	sigset_t sset;
-
-	if (signal_fd != -1){
-		close(signal_fd);
-		signal_fd = -1;
-	}
 #endif
 
 	dfl.sa_handler = SIG_DFL;
@@ -567,29 +562,10 @@ set_sigxcpu_handler(void)
 }
 #endif
 
-void signal_fd_close(int min_fd)
-{
-#ifdef HAVE_SIGNALFD
-	if (signal_fd >= min_fd) {
-		close(signal_fd);
-		signal_fd = -1;
-	}
-#else
-	if (signal_pipe[0] >= min_fd) {
-		close(signal_pipe[0]);
-		signal_pipe[0] = -1;
-	}
-	if (signal_pipe[1] >= min_fd) {
-		close(signal_pipe[1]);
-		signal_pipe[1] = -1;
-	}
-#endif
-}
-
 #ifdef THREAD_DUMP
 void
 register_signal_thread_addresses(void)
 {
-        register_thread_address("signal_run_callback", signal_run_callback);
+	register_thread_address("signal_run_callback", signal_run_callback);
 }
 #endif

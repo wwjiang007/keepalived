@@ -28,6 +28,7 @@
 /* keepalived includes */
 #include "utils.h"
 #include "html.h"
+#include "align.h"
 
 /* genhash includes */
 #include "include/http.h"
@@ -153,7 +154,7 @@ finalize(thread_ref_t thread)
 	if (req->verbose) {
 		printf("\n");
 		printf(HTML_HASH);
-		dump_buffer((char *) digest, digest_length, stdout, 0);
+		dump_buffer(PTR_CAST(char, digest), digest_length, stdout, 0);
 
 		printf(HTML_HASH_FINAL);
 	}
@@ -263,7 +264,7 @@ http_process_stream(SOCK * sock_obj, int r)
 }
 
 /* Asynchronous HTTP stream reader */
-static int
+static void
 http_read_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
@@ -272,7 +273,8 @@ http_read_thread(thread_ref_t thread)
 	/* Handle read timeout */
 	if (thread->type == THREAD_READ_TIMEOUT) {
 		exit_code = 1;
-		return epilog(thread);
+		epilog(thread);
+		return;
 	}
 
 	/* read the HTTP stream */
@@ -300,7 +302,8 @@ http_read_thread(thread_ref_t thread)
 		    strerror(errno));
 #endif
 		exit_code = 1;
-		return epilog(thread);
+		epilog(thread);
+		return;
 	} else {
 		/* Handle the response stream */
 		http_process_stream(sock_obj, (int)r);
@@ -312,12 +315,10 @@ http_read_thread(thread_ref_t thread)
 		thread_add_read(thread->master, http_read_thread, sock_obj,
 				thread->u.f.fd, req->timeout, true);
 	}
-
-	return 0;
 }
 
 /* remote Web server is connected, send it the get url query.  */
-int
+void
 http_request_thread(thread_ref_t thread)
 {
 	SOCK *sock_obj = THREAD_ARG(thread);
@@ -330,23 +331,24 @@ http_request_thread(thread_ref_t thread)
 	/* Handle read timeout */
 	if (thread->type == THREAD_WRITE_TIMEOUT) {
 		exit_code = 1;
-		return epilog(thread);
+		epilog(thread);
+		return;
 	}
 
 	/* Allocate & clean the GET string */
-	str_request = (char *) MALLOC(GET_BUFFER_LENGTH);
+	str_request = PTR_CAST(char, MALLOC(GET_BUFFER_LENGTH));
 
 	if (req->vhost) {
 		/* If vhost was defined we don't need to override it's port */
 		request_host = req->vhost;
-		str = (char*) MALLOC(1);
+		str = PTR_CAST(char, MALLOC(1));
 		*str = '\0';
 		request_host_port = str;
 	} else {
 		request_host = req->ipaddress;
 
 		/* Allocate a buffer for the port string ( ":" [0-9][0-9][0-9][0-9][0-9] "\0" ) */
-		str = (char*) MALLOC(7);
+		str = PTR_CAST(char, MALLOC(7));
 		snprintf(str, 7, ":%d", ntohs(req->addr_port));
 		request_host_port = str;
 	}
@@ -377,11 +379,12 @@ http_request_thread(thread_ref_t thread)
 			req->ipaddress,
 			ntohs(req->addr_port));
 		exit_code = 1;
-		return epilog(thread);
+		epilog(thread);
+		return;
 	}
 
 	/* Allocate & clean the get buffer */
-	sock_obj->buffer = (char *) MALLOC(MAX_BUFFER_LENGTH);
+	sock_obj->buffer = PTR_CAST(char, MALLOC(MAX_BUFFER_LENGTH));
 
 	/* Initalize the hash context */
 	sock_obj->hash = &hashes[req->hash];
@@ -396,6 +399,4 @@ http_request_thread(thread_ref_t thread)
 	else
 		thread_add_read(thread->master, http_read_thread, sock_obj,
 				sock_obj->fd, req->timeout, true);
-
-	return 1;
 }

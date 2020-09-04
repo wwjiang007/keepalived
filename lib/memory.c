@@ -42,8 +42,10 @@
 #include "bitops.h"
 #include "logger.h"
 #include "scheduler.h"
+#include "process.h"
 
 #ifdef _MEM_CHECK_
+#include "align.h"
 #include "timer.h"
 #include "rbtree.h"
 #include "list_head.h"
@@ -163,12 +165,12 @@ typedef struct {
 } MEMCHECK;
 
 /* Last free pointers */
-static LH_LIST_HEAD(free_list);
+static LIST_HEAD_INITIALIZE(free_list);
 static unsigned free_list_size;
 
 /* alloc_list entries used for 1000 VRRP instance each with VMAC interfaces is 33589 */
 static rb_root_t alloc_list = RB_ROOT;
-static LH_LIST_HEAD(bad_list);
+static LIST_HEAD_INITIALIZE(bad_list);
 
 static unsigned number_alloc_list;	/* number of alloc_list allocation entries */
 static unsigned max_alloc_list;
@@ -222,7 +224,7 @@ get_free_alloc_entry(void)
 		entry = malloc(sizeof *entry);
 	else {
 		entry = list_first_entry(&free_list, MEMCHECK, l);
-		list_head_del(&entry->l);
+		list_del_init(&entry->l);
 		free_list_size--;
 	}
 
@@ -240,7 +242,7 @@ keepalived_malloc_common(size_t size, const char *file, const char *function, in
 	buf = zalloc(size + sizeof (unsigned long));
 
 #ifndef _NO_UNALIGNED_ACCESS_
-	*(unsigned long *) ((char *) buf + size) = size + CHECK_VAL;
+	*(unsigned long *) PTR_CAST_ASSIGN((char *) buf + size) = size + CHECK_VAL;
 #else
 	unsigned long check_val = CHECK_VAL;
 
@@ -394,7 +396,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 
 	check = entry->size + CHECK_VAL;
 #ifndef _NO_UNALIGNED_ACCESS_
-	if (*(unsigned long *)((char *)buffer + entry->size) != check) {
+	if (*(unsigned long *) PTR_CAST_ASSIGN((char *)buffer + entry->size) != check) {
 #else
 	if (memcmp((unsigned char *)buffer + entry->size, (unsigned char *)&check_val, sizeof(check_val))) {
 #endif
@@ -493,7 +495,7 @@ keepalived_free_realloc_common(void *buffer, size_t size, const char *file, cons
 #endif
 
 #ifndef _NO_UNALIGNED_ACCESS_
-	*(unsigned long *) ((char *) buffer + size) = size + CHECK_VAL;
+	*(unsigned long *) PTR_CAST_ASSIGN((char *) buffer + size) = size + CHECK_VAL;
 #else
 	memcpy((unsigned char *)buffer + size, (unsigned char *)&check_val, sizeof(check_val));
 #endif
@@ -669,7 +671,7 @@ mem_log_init(const char* prog_name, const char *banner)
 	if (log_op)
 		fclose(log_op);
 
-	log_name_len = 5 + strlen(prog_name) + 5 + 7 + 4 + 1;	/* "/tmp/" + prog_name + "_mem." + PID + ".log" + '\0" */
+	log_name_len = 5 + strlen(prog_name) + 5 + PID_MAX_DIGITS + 4 + 1;	/* "/tmp/" + prog_name + "_mem." + PID + ".log" + '\0" */
 	log_name = malloc(log_name_len);
 	if (!log_name) {
 		log_message(LOG_INFO, "Unable to malloc log file name");
@@ -718,5 +720,16 @@ update_mem_check_log_perms(mode_t umask_bits)
 {
 	if (log_op)
 		fchmod(fileno(log_op), (S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH) & ~umask_bits);
+}
+
+void
+log_mem_check_message(const char *format, ...)
+{
+	va_list args;
+
+	va_start(args, format);
+	vfprintf(log_op, format, args);
+	va_end(args);
+	fprintf(log_op, "\n");
 }
 #endif

@@ -26,6 +26,9 @@
 #ifdef NETLINK_H_NEEDS_SYS_SOCKET_H
 #include <sys/socket.h>
 #endif
+#ifdef _HAVE_LINUX_IF_ETHER_H_COLLISION_
+#include <netinet/in.h>
+#endif
 #include <linux/if_link.h>
 #include <stdint.h>
 
@@ -79,7 +82,7 @@ add_link_local_address(interface_t *ifp, struct in6_addr* sin6_addr)
 
 	if (netlink_ipaddress(&ipaddress, IPADDRESS_ADD) != 1) {
 		log_message(LOG_INFO, "Adding link-local address to vmac failed");
-		ifp->sin6_addr.s6_addr32[0] = 0;
+		CLEAR_IP6_ADDR(&ifp->sin6_addr);
 
 		return false;
 	}
@@ -116,12 +119,12 @@ replace_link_local_address(interface_t *ifp)
 	if (netlink_ipaddress(&ipaddress, IPADDRESS_DEL) != 1)
 		log_message(LOG_INFO, "Deleting link-local address from vmac failed");
 	else
-		ifp->sin6_addr.s6_addr32[0] = 0;
+		CLEAR_IP6_ADDR(&ifp->sin6_addr);
 
 	ipaddress.u.sin6_addr = ipaddress_new;
 	if (netlink_ipaddress(&ipaddress, IPADDRESS_ADD) != 1) {
 		log_message(LOG_INFO, "Adding link-local address to vmac failed");
-		ifp->sin6_addr.s6_addr32[0] = 0;
+		CLEAR_IP6_ADDR(&ifp->sin6_addr);
 
 		return false;
 	}
@@ -217,7 +220,7 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 
 	if (ifp->ifindex) {
 		/* Check to see whether this interface has wrong mac ? */
-		if (memcmp((const void *) ifp->hw_addr, (const void *) ll_addr, ETH_ALEN) != 0 ||
+		if (memcmp((const void *)ifp->hw_addr, (const void *)ll_addr, ETH_ALEN) != 0 ||
 		     ifp->base_ifindex != vrrp->ifp->ifindex ||
 		     ifp->vmac_type != MACVLAN_MODE_PRIVATE) {
 			/* Be safe here - we don't want to remove a physical interface */
@@ -261,10 +264,10 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 		req.ifi.ifi_family = AF_UNSPEC;
 
 		/* macvlan settings */
-		linkinfo = NLMSG_TAIL(&req.n);
+		linkinfo = PTR_CAST(struct rtattr, NLMSG_TAIL(&req.n));
 		addattr_l(&req.n, sizeof(req), IFLA_LINKINFO, NULL, 0);
 		addattr_l(&req.n, sizeof(req), IFLA_INFO_KIND, (const void *)macvlan_ll_kind, strlen(macvlan_ll_kind));
-		data = NLMSG_TAIL(&req.n);
+		data = PTR_CAST(struct rtattr, NLMSG_TAIL(&req.n));
 		addattr_l(&req.n, sizeof(req), IFLA_INFO_DATA, NULL, 0);
 
 		/*
@@ -307,7 +310,7 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 			return false;
 
 		if (!ifp->base_ifp &&
-		    IS_VLAN(vrrp->configured_ifp) &&
+		    IS_MAC_IP_VLAN(vrrp->configured_ifp) &&
 		    vrrp->configured_ifp == vrrp->configured_ifp->base_ifp) {
 			/* If the base interface is a MACVLAN/IPVLAN that has been moved into a
 			 * different network namespace from its parent, we can't find the parent */
@@ -360,9 +363,9 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 
 		struct rtattr* spec;
 
-		spec = NLMSG_TAIL(&req.n);
+		spec = PTR_CAST(struct rtattr, NLMSG_TAIL(&req.n));
 		addattr_l(&req.n, sizeof(req), IFLA_AF_SPEC, NULL,0);
-		data = NLMSG_TAIL(&req.n);
+		data = PTR_CAST(struct rtattr, NLMSG_TAIL(&req.n));
 		addattr_l(&req.n, sizeof(req), AF_INET6, NULL,0);
 		addattr8(&req.n, sizeof(req), IFLA_INET6_ADDR_GEN_MODE, IN6_ADDR_GEN_MODE_NONE);
 		data->rta_len = (unsigned short)((char *)NLMSG_TAIL(&req.n) - (char *)data);
@@ -386,9 +389,9 @@ netlink_link_add_vmac(vrrp_t *vrrp)
 
 			ipaddress.ifp = ifp;
 			if (vrrp->saddr.ss_family == AF_INET6)
-				ipaddress.u.sin6_addr = ((struct sockaddr_in6*)&vrrp->saddr)->sin6_addr;
-			else if (ifp->base_ifp->sin6_addr.s6_addr32[0])
-				ipaddress.u.sin6_addr = ifp->base_ifp->sin6_addr;
+				ipaddress.u.sin6_addr = PTR_CAST(struct sockaddr_in6, &vrrp->saddr)->sin6_addr;
+			else if (IS_IP6_ADDR(&vrrp->configured_ifp->sin6_addr))
+				ipaddress.u.sin6_addr = vrrp->configured_ifp->sin6_addr;
 			else
 				make_link_local_address(&ipaddress.u.sin6_addr, ifp->base_ifp->hw_addr);
 			ipaddress.ifa.ifa_family = AF_INET6;
@@ -449,14 +452,14 @@ typedef struct {
 static void
 dump_bufn(const char *msg, req_t *req)
 {
-        size_t i;
+	size_t i;
 	char buf[3 * req->n.nlmsg_len + 3];
 	char *ptr = buf;
 
-        log_message(LOG_INFO, "%s: message length is %d\n", msg, req->n.nlmsg_len);
-        for (i = 0; i < req->n.nlmsg_len; i++)
-                ptr += snprintf(ptr, buf + sizeof buf - ptr, "%2.2x ", ((unsigned char *)&req->n)[i]);
-        log_message(LOG_INFO, "%s", buf);
+	log_message(LOG_INFO, "%s: message length is %d\n", msg, req->n.nlmsg_len);
+	for (i = 0; i < req->n.nlmsg_len; i++)
+		ptr += snprintf(ptr, buf + sizeof buf - ptr, "%2.2x ", PTR_CAST(unsigned char, &req->n)[i]);
+	log_message(LOG_INFO, "%s", buf);
 }
 #endif
 
@@ -502,10 +505,10 @@ netlink_link_add_ipvlan(vrrp_t *vrrp)
 		 * interface only the underlying interface of the ipvlan */
 		addattr32(&req.n, sizeof(req), IFLA_LINK, vrrp->configured_ifp->ifindex);
 		addattr_l(&req.n, sizeof(req), IFLA_IFNAME, vrrp->vmac_ifname, strlen(vrrp->vmac_ifname));
-		linkinfo = NLMSG_TAIL(&req.n);
+		linkinfo = PTR_CAST(struct rtattr, NLMSG_TAIL(&req.n));
 		addattr_l(&req.n, sizeof(req), IFLA_LINKINFO, NULL, 0);
 		addattr_l(&req.n, sizeof(req), IFLA_INFO_KIND, (const void *)ipvlan_ll_kind, strlen(ipvlan_ll_kind));
-		data = NLMSG_TAIL(&req.n);
+		data = PTR_CAST(struct rtattr, NLMSG_TAIL(&req.n));
 		addattr_l(&req.n, sizeof(req), IFLA_INFO_DATA, NULL, 0);
 
 		/*
@@ -695,18 +698,17 @@ netlink_update_vrf(vrrp_t *vrrp)
 void
 update_vmac_vrfs(interface_t *ifp)
 {
+	tracking_obj_t *top;
 	vrrp_t *vrrp;
-        tracking_vrrp_t *tvp;
-        element e;
 
-        LIST_FOREACH(ifp->tracking_vrrp, tvp, e) {
-                vrrp = tvp->vrrp;
+	list_for_each_entry(top, &ifp->tracking_vrrp, e_list) {
+		vrrp = top->obj.vrrp;
 
-                /* We only need to look for vmacs we created that
+		/* We only need to look for vmacs we created that
 		 * are configured on the interface which has changed
 		 * VRF */
-                if (vrrp->configured_ifp != ifp ||
-                    !vrrp->ifp->is_ours)
+		if (vrrp->configured_ifp != ifp ||
+		    !vrrp->ifp->is_ours)
 			continue;
 
 		vrrp->ifp->vrf_master_ifp = ifp->vrf_master_ifp;

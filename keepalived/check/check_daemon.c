@@ -22,9 +22,7 @@
 
 #include "config.h"
 
-#ifdef _HAVE_SCHED_RT_
 #include <sched.h>
-#endif
 #include <errno.h>
 #include <signal.h>
 #include <unistd.h>
@@ -43,12 +41,15 @@
 #include "check_misc.h"
 #include "check_smtp.h"
 #include "check_tcp.h"
+#include "check_udp.h"
 #endif
 #include "check_daemon.h"
 #include "check_parser.h"
 #include "ipwrapper.h"
 #include "check_ssl.h"
 #include "check_api.h"
+#include "check_ping.h"
+#include "check_file.h"
 #include "global_data.h"
 #include "pidfile.h"
 #include "signals.h"
@@ -69,6 +70,7 @@
 #include "check_bfd.h"
 #endif
 #include "timer.h"
+#include "track_file.h"
 #ifdef _WITH_CN_PROC_
 #include "track_process.h"
 #endif
@@ -78,7 +80,11 @@ bool using_ha_suspend;
 
 /* local variables */
 static const char *check_syslog_ident;
+#ifndef __ONE_PROCESS_DEBUG_
 static bool two_phase_terminate;
+static timeval_t check_start_time;
+static unsigned check_next_restart_delay;
+#endif
 
 /* set fd ulimits  */
 static void
@@ -100,19 +106,17 @@ set_checker_max_fds(void)
 	 *   12	closed
 	 *   13	passwd file
 	 *   14	Unix domain socket
-	 *   One per checker using UDP/TCP
+	 *   One per checker using UDP/TCP/PING
 	 *   One per SMTP alert
 	 *   qty 10 spare
 	 */
 	set_max_file_limit(14 + check_data->num_checker_fd_required + check_data->num_smtp_alert + 10);
 }
 
-static int
+static void
 lvs_notify_fifo_script_exit(__attribute__((unused)) thread_ref_t thread)
 {
 	log_message(LOG_INFO, "lvs notify fifo script terminated");
-
-	return 0;
 }
 
 static void
@@ -125,6 +129,16 @@ checker_dispatcher_release(void)
 	cancel_kernel_netlink_threads();
 }
 
+static bool
+checker_ipvs_syncd_needed(void)
+{
+#ifdef _WITH_VRRP_
+	if (global_data->lvs_syncd.vrrp_name)
+		return false;
+#endif
+
+        return !!global_data->lvs_syncd.ifname;
+}
 
 /* Daemon stop sequence */
 static int
@@ -135,18 +149,25 @@ checker_terminate_phase2(void)
 	/* Remove the notify fifo */
 	notify_fifo_close(&global_data->notify_fifo, &global_data->lvs_notify_fifo);
 
+#ifdef _WITH_SNMP_CHECKER_
+	if (global_data && global_data->enable_snmp_checker)
+		check_snmp_agent_close();
+#endif
+
 	/* Destroy master thread */
 	checker_dispatcher_release();
 	thread_destroy_master(master);
 	master = NULL;
 	free_checkers_queue();
 	free_ssl();
+	set_ping_group_range(false);
 
+	/* If we are running both master and backup, stop them now */
+	if (checker_ipvs_syncd_needed()) {
+		ipvs_syncd_cmd(IPVS_STOPDAEMON, NULL, IPVS_MASTER, true);
+		ipvs_syncd_cmd(IPVS_STOPDAEMON, NULL, IPVS_BACKUP, true);
+	}
 	ipvs_stop();
-#ifdef _WITH_SNMP_CHECKER_
-	if (global_data && global_data->enable_snmp_checker)
-		check_snmp_agent_close();
-#endif
 
 	/* Stop daemon */
 	pidfile_rm(checkers_pidfile);
@@ -179,14 +200,14 @@ checker_terminate_phase2(void)
 	FREE_CONST_PTR(check_syslog_ident);
 #else
 	if (check_syslog_ident)
-		free(no_const_char_p(check_syslog_ident));
+		free(no_const_char_p(check_syslog_ident));	/* malloc'd by make_syslog_ident() */
 #endif
 	close_std_fd();
 
 	return 0;
 }
 
-static int
+static void
 checker_shutdown_backstop_thread(thread_ref_t thread)
 {
 	int count = 0;
@@ -206,8 +227,6 @@ checker_shutdown_backstop_thread(thread_ref_t thread)
 		thread_add_timer_shutdown(thread->master, checker_shutdown_backstop_thread, NULL, TIMER_HZ / 10);
 	else
 		thread_add_terminate_event(thread->master);
-
-	return 0;
 }
 
 static void
@@ -219,6 +238,10 @@ checker_terminate_phase1(bool schedule_next_thread)
 	/* Terminate all script processes */
 	if (master->child.rb_root.rb_node)
 		script_killall(master, SIGTERM, true);
+
+	/* Stop monitoring files */
+	if (!list_empty(&check_data->track_files))
+		stop_track_files();
 
 	/* Send shutdown messages */
 	if (!__test_bit(DONT_RELEASE_IPVS_BIT, &debug)) {
@@ -242,15 +265,13 @@ checker_terminate_phase1(bool schedule_next_thread)
 }
 
 #ifndef _ONE_PROCESS_DEBUG_
-static int
+static void
 start_checker_termination_thread(__attribute__((unused)) thread_ref_t thread)
 {
 	/* This runs in the context of a thread */
 	two_phase_terminate = true;
 
 	checker_terminate_phase1(true);
-
-	return 0;
 }
 #endif
 
@@ -272,7 +293,7 @@ stop_check(int status)
 
 /* Daemon init sequence */
 static void
-start_check(list old_checkers_queue, data_t *prev_global_data)
+start_check(list_head_t *old_checkers_queue, data_t *prev_global_data)
 {
 	init_checkers_queue();
 
@@ -319,10 +340,36 @@ start_check(list old_checkers_queue, data_t *prev_global_data)
 		return;
 
 	/* Initialize sub-system if any virtual servers are configured */
-	if ((!LIST_ISEMPTY(check_data->vs) || (reload && !LIST_ISEMPTY(old_check_data->vs))) &&
+	if ((!list_empty(&check_data->vs) || (reload && !list_empty(&old_check_data->vs))) &&
 	    ipvs_start() != IPVS_SUCCESS) {
 		stop_check(KEEPALIVED_EXIT_FATAL);
 		return;
+	}
+
+	/* Set LVS timeouts */
+	if (global_data->lvs_timeouts.tcp_timeout ||
+	    global_data->lvs_timeouts.tcp_fin_timeout ||
+	    global_data->lvs_timeouts.udp_timeout)
+		ipvs_set_timeouts(&global_data->lvs_timeouts);
+	else if (reload)
+		ipvs_set_timeouts(NULL);
+
+	/* If we are managing the sync daemon, then stop any
+	 * instances of it that may have been running if
+	 * we terminated abnormally */
+	if (checker_ipvs_syncd_needed() &&
+	    (!reload ||
+	     ipvs_syncd_changed(&prev_global_data->lvs_syncd, &global_data->lvs_syncd))) {
+		ipvs_syncd_cmd(IPVS_STOPDAEMON, NULL, IPVS_MASTER, true);
+		ipvs_syncd_cmd(IPVS_STOPDAEMON, NULL, IPVS_BACKUP, true);
+	}
+
+	if (checker_ipvs_syncd_needed()) {
+		/* If we are running both master and backup, start them now */
+		if (global_data->lvs_syncd.syncid == PARAMETER_UNSET)
+			global_data->lvs_syncd.syncid = 0;
+
+		ipvs_syncd_cmd(IPVS_STARTDAEMON, &global_data->lvs_syncd, IPVS_MASTER_BACKUP, false);
 	}
 
 	/* Ensure we can open sufficient file descriptors */
@@ -345,22 +392,31 @@ start_check(list old_checkers_queue, data_t *prev_global_data)
 		ipvs_flush_cmd();
 
 #ifdef _WITH_SNMP_CHECKER_
-	if (!reload && global_data->enable_snmp_checker)
-		check_snmp_agent_init(global_data->snmp_socket);
+	if (global_data->enable_snmp_checker) {
+		if (reload)
+			snmp_epoll_info(master);
+		else
+			check_snmp_agent_init(global_data->snmp_socket);
+	}
 #endif
 
 	/* SSL load static data & initialize common ctx context */
 	if (check_data->ssl_required && !init_ssl_ctx())
 		stop_check(KEEPALIVED_EXIT_FATAL);
 
-	/* Processing differential configuration parsing */
-	if (reload) {
-		clear_diff_services(old_checkers_queue);
-		check_new_rs_state();
-	}
-
 	/* We can send SMTP messages from here so set the time */
 	set_time_now();
+
+	/* Set up the track files */
+	add_rs_to_track_files();
+	init_track_files(&check_data->track_files);
+
+	/* Processing differential configuration parsing */
+	if (reload)
+		clear_diff_services(old_checkers_queue);
+	set_track_file_checkers_down();
+	if (reload)
+		check_new_rs_state();
 
 	/* Initialize IPVS topology */
 	if (!init_services())
@@ -374,19 +430,14 @@ start_check(list old_checkers_queue, data_t *prev_global_data)
 	register_checkers_thread();
 
 	/* Set the process priority and non swappable if configured */
-	set_process_priorities(
-#ifdef _HAVE_SCHED_RT_
-			       global_data->checker_realtime_priority,
+	set_process_priorities(global_data->checker_realtime_priority, global_data->max_auto_priority, global_data->min_auto_priority_delay,
 #if HAVE_DECL_RLIMIT_RTTIME == 1
 			       global_data->checker_rlimit_rt,
 #endif
-#endif
 			       global_data->checker_process_priority, global_data->checker_no_swap ? 4096 : 0);
 
-#ifdef _HAVE_SCHED_RT_
 	/* Set the process cpu affinity if configured */
 	set_process_cpu_affinity(&global_data->checker_cpu_mask, "checker");
-#endif
 }
 
 void
@@ -397,10 +448,10 @@ check_validate_config(void)
 
 #ifndef _ONE_PROCESS_DEBUG_
 /* Reload thread */
-static int
+static void
 reload_check_thread(__attribute__((unused)) thread_ref_t thread)
 {
-	list old_checkers_queue;
+	list_head_t old_checkers_queue;
 	bool with_snmp = false;
 
 	log_message(LOG_INFO, "Reloading");
@@ -416,6 +467,9 @@ reload_check_thread(__attribute__((unused)) thread_ref_t thread)
 	/* Terminate all script process */
 	script_killall(master, SIGTERM, false);
 
+	if (!list_empty(&check_data->track_files))
+		stop_track_files();
+
 	/* Remove the notify fifo - we don't know if it will be the same after a reload */
 	notify_fifo_close(&global_data->notify_fifo, &global_data->lvs_notify_fifo);
 
@@ -430,8 +484,8 @@ reload_check_thread(__attribute__((unused)) thread_ref_t thread)
 	thread_add_base_threads(master, with_snmp);
 
 	/* Save previous checker data */
-	old_checkers_queue = checkers_queue;
-	checkers_queue = NULL;
+	list_copy(&old_checkers_queue, &checkers_queue);
+	init_checkers_queue();
 
 	free_ssl();
 	ipvs_stop();
@@ -443,22 +497,19 @@ reload_check_thread(__attribute__((unused)) thread_ref_t thread)
 	global_data = NULL;
 
 	/* Reload the conf */
-	start_check(old_checkers_queue, old_global_data);
+	start_check(&old_checkers_queue, old_global_data);
 
 	/* free backup data */
 	free_check_data(old_check_data);
 	free_global_data(old_global_data);
-	free_list(&old_checkers_queue);
+	free_checker_list(&old_checkers_queue);
 	UNSET_RELOAD;
-
-	return 0;
 }
 
-static int
+static void
 print_check_data(__attribute__((unused)) thread_ref_t thread)
 {
-        check_print_data();
-        return 0;
+	check_print_data();
 }
 
 static void
@@ -497,21 +548,35 @@ check_signal_init(void)
 	signal_ignore(SIGPIPE);
 }
 
-/* CHECK Child respawning thread */
-static int
+/* This function runs in the parent process. */
+static void
+delayed_restart_check_child_thread(__attribute__((unused)) thread_ref_t thread)
+{
+	start_check_child();
+}
+
+/* CHECK Child respawning thread. This function runs in the parent process. */
+static void
 check_respawn_thread(thread_ref_t thread)
 {
+	unsigned restart_delay;
+
 	/* We catch a SIGCHLD, handle it */
 	checkers_child = 0;
 
-	if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
+	if (report_child_status(thread->u.c.status, thread->u.c.pid, NULL))
+		thread_add_terminate_event(thread->master);
+	else if (!__test_bit(DONT_RESPAWN_BIT, &debug)) {
 		log_message(LOG_ALERT, "Healthcheck child process(%d) died: Respawning", thread->u.c.pid);
-		start_check_child();
+		restart_delay = calc_restart_delay(&check_start_time, &check_next_restart_delay, "Healthcheck");
+		if (!restart_delay)
+			start_check_child();
+		else
+			thread_add_timer(thread->master, delayed_restart_check_child_thread, NULL, restart_delay * TIMER_HZ);
 	} else {
 		log_message(LOG_ALERT, "Healthcheck child process(%d) died: Exiting", thread->u.c.pid);
 		raise(SIGTERM);
 	}
-	return 0;
 }
 #endif
 
@@ -519,6 +584,9 @@ check_respawn_thread(thread_ref_t thread)
 static void
 register_check_thread_addresses(void)
 {
+	/* Remove anything we might have inherited from parent */
+	deregister_thread_addresses();
+
 	register_scheduler_addresses();
 	register_signal_thread_addresses();
 	register_notify_addresses();
@@ -535,6 +603,9 @@ register_check_thread_addresses(void)
 	register_check_smtp_addresses();
 	register_check_ssl_addresses();
 	register_check_tcp_addresses();
+	register_check_ping_addresses();
+	register_check_udp_addresses();
+	register_check_file_addresses();
 #ifdef _WITH_BFD_
 	register_check_bfd_addresses();
 #endif
@@ -575,6 +646,8 @@ start_check_child(void)
 		return -1;
 	} else if (pid) {
 		checkers_child = pid;
+		check_start_time = time_now;
+
 		log_message(LOG_INFO, "Starting Healthcheck child process, pid=%d"
 			       , pid);
 
@@ -584,6 +657,7 @@ start_check_child(void)
 
 		return 0;
 	}
+
 	prctl(PR_SET_PDEATHSIG, SIGTERM);
 
 	prog_type = PROG_TYPE_CHECKER;
@@ -695,6 +769,7 @@ register_check_parent_addresses(void)
 #ifndef _ONE_PROCESS_DEBUG_
 	register_thread_address("print_check_data", print_check_data);
 	register_thread_address("check_respawn_thread", check_respawn_thread);
+	register_thread_address("delayed_restart_check_child_thread", delayed_restart_check_child_thread);
 #endif
 }
 #endif
